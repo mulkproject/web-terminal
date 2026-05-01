@@ -55,13 +55,32 @@ import { join as pathJoin, extname, basename } from 'path';
 
 // GitHub Copilot SDK (optional)
 let CopilotClient, approveAll;
+let copilotSdkImportError = null;
 try {
   const copilotSdk = await import('@github/copilot-sdk');
   CopilotClient = copilotSdk.CopilotClient;
   approveAll = copilotSdk.approveAll;
   console.log('✅ GitHub Copilot SDK loaded');
 } catch (err) {
-  console.log('⚠️  GitHub Copilot SDK not available:', err.message);
+  copilotSdkImportError = err.message;
+  console.log('⚠️  GitHub Copilot SDK not available from @github/copilot-sdk:', err.message);
+  
+  // Fallback: try importing from the actual SDK path inside @github/copilot/copilot-sdk
+  // This handles standalone releases where the proxy package was excluded but the actual code remains
+  try {
+    const { pathToFileURL } = await import('url');
+    const { dirname, join } = await import('path');
+    const { fileURLToPath } = await import('url');
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const fallbackPath = pathToFileURL(join(__dirname, 'node_modules', '@github', 'copilot', 'copilot-sdk', 'index.js')).href;
+    const copilotSdk = await import(fallbackPath);
+    CopilotClient = copilotSdk.CopilotClient;
+    approveAll = copilotSdk.approveAll;
+    console.log('✅ GitHub Copilot SDK loaded from fallback path (@github/copilot/copilot-sdk)');
+    copilotSdkImportError = null;
+  } catch (fallbackErr) {
+    console.log('⚠️  GitHub Copilot SDK fallback import also failed:', fallbackErr.message);
+  }
 }
 
 // Import CLI Adapter (alternative to SDK)
@@ -1434,9 +1453,10 @@ app.post('/api/chat/test-connection', requireAuth, async (req, res) => {
 app.post('/api/chat/init', requireAuth, async (req, res) => {
   try {
     if (!CopilotClient) {
+      const errDetail = copilotSdkImportError ? ` (${copilotSdkImportError})` : '';
       return res.status(503).json({ 
         success: false, 
-        message: 'Copilot SDK not installed. Run: npm install @github/copilot-sdk'
+        message: `Copilot SDK not available${errDetail}. To enable chat, install it with: npm install @github/copilot-sdk (requires GitHub Package Registry auth). If you already installed it, check the server console for the actual import error.`
       });
     }
     
@@ -2306,10 +2326,11 @@ wss.on('connection', (ws) => {
           }
           
           if (!CopilotClient) {
-            console.log('❌ chat_session_create failed: Copilot SDK not installed');
+            const errDetail = copilotSdkImportError ? `: ${copilotSdkImportError}` : '';
+            console.log('❌ chat_session_create failed: Copilot SDK not installed' + errDetail);
             ws.send(JSON.stringify({
               type: 'chat_error',
-              message: 'Copilot SDK not installed'
+              message: `Copilot SDK not installed${errDetail}. Install: npm install @github/copilot-sdk (requires GitHub auth)`
             }));
             return;
           }
@@ -2666,9 +2687,10 @@ wss.on('connection', (ws) => {
           (async () => {
             try {
               if (!CopilotClient) {
+                const errDetail = copilotSdkImportError ? `: ${copilotSdkImportError}` : '';
                 ws.send(JSON.stringify({
                   type: 'chat_error',
-                  message: 'Copilot SDK not installed'
+                  message: `Copilot SDK not installed${errDetail}. Install: npm install @github/copilot-sdk (requires GitHub auth)`
                 }));
                 return;
               }

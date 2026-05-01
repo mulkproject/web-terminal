@@ -855,6 +855,18 @@ Status:
         all_installed = True
         for key, pkg_name in packages:
             pkg_path = os.path.join(self.app_dir, 'node_modules', pkg_name)
+            # Special fallback for Copilot SDK: check both proxy package and actual code path
+            if key == 'copilot':
+                fallback_path = os.path.join(self.app_dir, 'node_modules', '@github', 'copilot', 'copilot-sdk')
+                if os.path.exists(pkg_path) or os.path.exists(fallback_path):
+                    self._set_offline_dep_status(key, True)
+                    self.dep_log(f"✅ {pkg_name} ready")
+                    continue
+                else:
+                    self._set_offline_dep_status(key, False)
+                    self.dep_log(f"⚠️ {pkg_name} not found")
+                    all_installed = False
+                    continue
             if os.path.exists(pkg_path):
                 self._set_offline_dep_status(key, True)
                 self.dep_log(f"✅ {pkg_name} ready")
@@ -1241,13 +1253,25 @@ CHAT_ENABLED={'true' if self.config.get('chat_enabled', True) else 'false'}
             messagebox.showerror("Error", f"Failed to start server:\n{str(e)}")
             
     def _is_port_in_use(self, port):
-        """Check if a port is already in use"""
+        """Check if a port is already in use (checks both IPv4 and IPv6 localhost)"""
         try:
+            # Check IPv4 localhost first
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
             result = sock.connect_ex(('127.0.0.1', port))
             sock.close()
-            return result == 0  # Port is in use if connect_ex returns 0
+            if result == 0:
+                return True
+            
+            # If IPv4 fails, check IPv6 localhost (Node.js may bind to ::1)
+            try:
+                sock6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                sock6.settimeout(1)
+                result6 = sock6.connect_ex(('::1', port))
+                sock6.close()
+                return result6 == 0
+            except:
+                return False
         except:
             return False
             
@@ -1263,25 +1287,28 @@ CHAT_ENABLED={'true' if self.config.get('chat_enabled', True) else 'false'}
             )
             
             for line in result.stdout.split('\n'):
-                if f':{port}' in line and 'LISTENING' in line:
+                # Look for lines with the port and LISTENING state
+                if 'LISTENING' in line:
                     parts = line.strip().split()
-                    if parts:
-                        # PID is the last column
-                        pid = parts[-1]
-                        if pid.isdigit():
-                            # Get process name from tasklist
-                            try:
-                                task_result = subprocess.run(
-                                    ['tasklist', '/fi', f'pid eq {pid}', '/fo', 'csv', '/nh'],
-                                    capture_output=True,
-                                    text=True,
-                                    shell=True
-                                )
-                                process_name = task_result.stdout.split(',')[0].strip().strip('"')
-                                return {'pid': int(pid), 'name': process_name}
-                            except:
-                                return {'pid': int(pid), 'name': 'Unknown'}
-            
+                    if len(parts) >= 2:
+                        # Local address is the second column (e.g., 127.0.0.1:3456 or [::1]:3456)
+                        local_addr = parts[1]
+                        if local_addr.endswith(f':{port}'):
+                            pid = parts[-1]
+                            if pid.isdigit():
+                                # Get process name from tasklist
+                                try:
+                                    task_result = subprocess.run(
+                                        ['tasklist', '/fi', f'pid eq {pid}', '/fo', 'csv', '/nh'],
+                                        capture_output=True,
+                                        text=True,
+                                        shell=True
+                                    )
+                                    process_name = task_result.stdout.split(',')[0].strip().strip('"')
+                                    return {'pid': int(pid), 'name': process_name}
+                                except:
+                                    return {'pid': int(pid), 'name': 'Unknown'}
+                        
             return None
         except Exception as e:
             self.log(f"⚠️ Could not get process info: {e}")
@@ -1589,8 +1616,9 @@ CHAT_ENABLED={'true' if self.config.get('chat_enabled', True) else 'false'}
         def try_connect():
             nonlocal attempt
             try:
-                # Use 127.0.0.1 for health check (works with localhost or 0.0.0.0 binding)
-                health_url = f"http://127.0.0.1:{port}/api/health"
+                # Use localhost for health check so Python resolves correctly
+                # (Node.js may bind to ::1 when host is 'localhost')
+                health_url = f"http://localhost:{port}/api/health"
                 req = urllib.request.Request(health_url, method='GET', timeout=2)
                 response = urllib.request.urlopen(req)
                 if response.status == 200:
