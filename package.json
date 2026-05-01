@@ -1,0 +1,88 @@
+{
+  "name": "terminal-web-ui",
+  "version": "1.0.0",
+  "description": "Web Terminal - Directory browser with integrated terminal for Copilot CLI",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "web-terminal-launcher": "launcher-cli.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "cli": "node launcher-cli.js",
+    "cli:interactive": "node launcher-cli.js interactive",
+    "cli:status": "node launcher-cli.js status",
+    "tui": "node launcher-tui.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop terminal-web-ui",
+    "pm2:restart": "pm2 restart terminal-web-ui",
+    "pm2:logs": "pm2 logs terminal-web-ui",
+    "pm2:delete": "pm2 delete terminal-web-ui",
+    "pm2:monit": "pm2 monit",
+    "electron": "electron electron/main.cjs",
+    "electron:dev": "set NODE_ENV=development && electron electron/main.cjs",
+    "build:launcher": "pkg launcher-cli.js -t node18-win-x64 -o Web-Terminal-PM2-Launcher.exe",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:portable": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.webterminal.pm2launcher",
+    "productName": "Web Terminal PM2 Launcher",
+    "asar": false,
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json",
+      "icon.ico",
+      "launcher-config.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icon.ico"
+    },
+    "portable": {
+      "artifactName": "Web-Terminal-PM2-Launcher-Portable.exe"
+    }
+  },
+  "keywords": [
+    "terminal",
+    "web-terminal",
+    "copilot-cli",
+    "xterm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@github/copilot-sdk": "^0.3.0",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.1.1",
+    "node-pty": "^1.1.0",
+    "winreg": "^1.2.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1",
+    "pkg": "^5.8.1",
+    "pm2": "^5.4.2"
+  }
+}

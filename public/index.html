@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0a0a0f">
+  <meta name="apple-mobile-web-app-title" content="Web Terminal">
+  <meta name="application-name" content="Web Terminal">
+  
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
+  <title>Web Terminal</title>
+  
+  <!-- XTerm.js -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+
+</head>
+<body>
+  <!-- Pull to Refresh Indicator -->
+  <div class="ptr-indicator" id="ptrIndicator">
+    <div class="spinner"></div>
+    <span>Refreshing...</span>
+  </div>
+
+  <!-- Auth Screen -->
+  <div class="auth-screen" id="authScreen">
+    <div class="auth-box">
+      <h1>🖥️ Web Terminal</h1>
+      <p class="subtitle">Secure terminal access</p>
+      
+      <div class="error-message" id="authError"></div>
+      
+      <form id="loginForm">
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" placeholder="Enter your email" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="password">Password</label>
+          <div class="password-input-wrapper">
+            <input type="password" id="password" placeholder="Enter your password" required>
+            <button type="button" class="password-toggle" id="togglePassword">👁️</button>
+          </div>
+        </div>
+        
+        <button type="submit" class="btn btn-primary" id="loginBtn">Sign In</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <!-- Mobile Sidebar Toggle -->
+  <button class="sidebar-toggle" id="sidebarToggle">☰</button>
+  
+  <!-- Sidebar Overlay for Mobile -->
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <div class="app-container" id="appContainer">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <h1>📁 File Browser</h1>
+        <div class="path-display">
+          <div class="current-path" id="currentPath">Loading...</div>
+          <button class="copy-path-btn" id="copyPathBtn" title="Copy path to clipboard">📋</button>
+        </div>
+      </div>
+      
+      <div class="user-info">
+        <div class="user-email" id="userEmail">Not logged in</div>
+        <div class="user-actions">
+          <button class="btn btn-secondary btn-small" id="changeEmailBtn">Change Email</button>
+          <button class="btn btn-secondary btn-small" id="resetPasswordBtn">Reset Password</button>
+          <button class="btn btn-secondary btn-small" id="logoutBtn">Logout</button>
+        </div>
+      </div>
+      
+      <div class="directory-list" id="directoryList">
+        <div style="padding: 32px 16px; text-align: center; color: var(--text-muted);">
+          Loading...
+        </div>
+      </div>
+      
+      <div class="sidebar-actions">
+        <button class="btn btn-primary" id="openTerminalBtn" disabled>
+          🖥️ Open Terminal Here
+        </button>
+        <button class="btn btn-secondary" id="refreshBtn">
+          🔄 Refresh
+        </button>
+      </div>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="main-content" id="mainContent">
+      <div class="terminal-header">
+        <div class="terminal-info" id="terminalInfo">Terminal - Not connected</div>
+        <div class="terminal-actions">
+          <!-- View Toggle -->
+          <div class="view-toggle">
+            <button class="view-toggle-btn active" id="viewTerminalBtn" title="Switch to Terminal">
+              🖥️ Terminal
+            </button>
+            <button class="view-toggle-btn" id="viewChatBtn" title="Switch to Chat">
+              💬 Chat
+            </button>
+          </div>
+          <button class="mobile-more-btn terminal-more-btn" id="terminalMoreBtn" title="More actions">⋯</button>
+          <div class="mobile-more-group" id="terminalMoreGroup">
+            <button class="btn btn-secondary btn-small" id="newTerminalBtn" title="Create new terminal">
+              <span class="btn-icon">+</span><span class="btn-text">New Terminal</span>
+            </button>
+            <button class="btn btn-secondary btn-small" id="selectShellBtn" title="Change terminal shell type">
+              <span class="btn-icon">🖥️</span><span class="btn-text">Shell</span>
+            </button>
+            <button class="btn btn-secondary btn-small" id="savedCommandsBtn">
+              <span class="btn-icon">💾</span><span class="btn-text">Commands</span>
+            </button>
+            <button class="btn btn-secondary btn-small" id="clearTerminalBtn">
+              <span class="btn-icon">🗑️</span><span class="btn-text">Clear</span>
+            </button>
+            <button class="btn btn-secondary btn-small pwa-install-btn" id="pwaInstallBtn">
+              <span class="btn-icon">📲</span><span class="btn-text">Install</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Terminal Tabs -->
+      <div class="terminal-tabs" id="terminalTabs"></div>
+
+      <!-- Terminal View -->
+      <div class="terminal-view" id="terminalView">
+        <div class="terminal-container" id="terminalContainer">
+          <div class="no-terminal-message" id="noTerminalMsg">
+            <p>🖥️ No terminal open</p>
+            <p class="hint">Click "+ New Terminal" or select a directory and click "Open Terminal Here"<br><small style="opacity: 0.7;">Tip: Use Ctrl+Home/End to scroll, Ctrl+PgUp/PgDn for pages</small></p>
+          </div>
+        </div>
+
+        <div class="status-bar">
+          <div class="status-indicator">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Connecting...</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="terminalStatus" style="font-size: 11px;">No terminal</div>
+            <div class="status-hint-text" style="font-size: 10px; color: var(--text-muted);">Ctrl+Home/End: Scroll | Ctrl+PgUp/PgDn: Page</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat Page View -->
+      <div class="chat-page" id="chatPage">
+        <!-- Chat Session Tabs -->
+        <div class="chat-tabs" id="chatTabs">
+          <button class="chat-tab history-btn" id="showHistoryBtn" title="Chat History">
+            <span>📜</span>
+          </button>
+          <button class="chat-tab new-session-btn" id="newChatSessionBtn" title="New Chat Session">
+            <span>+</span>
+          </button>
+          <button class="chat-tab close-all-btn" id="closeAllChatSessionsBtn" title="Close All Sessions">
+            <span>🗑️</span>
+          </button>
+        </div>
+
+        <!-- Session History Panel (hidden by default) -->
+        <div class="session-history-panel" id="sessionHistoryPanel" style="display: none;">
+          <div class="session-history-header-bar">
+            <h4>📜 Chat History</h4>
+            <button class="session-history-close" onclick="hideSessionHistoryPanel()">×</button>
+          </div>
+          <div class="session-history-list" id="sessionHistoryList">
+            <div class="session-history-empty">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Chat Container -->
+        <div class="chat-container" id="chatContainer">
+          <!-- Empty State (shown when no session active) -->
+          <div class="empty-chat-state" id="emptyChatState">
+            <div class="icon">💬</div>
+            <h3>Welcome to Copilot Chat</h3>
+            <p>Start a new conversation or select an existing session from the tabs above.</p>
+            <button class="btn btn-primary" id="startNewChatBtn" style="margin-top: 20px;">
+              <span>➕ New Chat Session</span>
+            </button>
+          </div>
+
+          <!-- Active Chat UI (shown when session active) -->
+          <div class="chat-active-ui" id="chatActiveUi" style="display: none; flex-direction: column; flex: 1;">
+            <!-- Chat Model Bar -->
+            <div class="chat-model-bar">
+              <select class="chat-model-select" id="chatModelSelect" title="Select AI Model">
+                <option value="">Loading models...</option>
+              </select>
+              <div style="flex: 1;"></div>
+              <span class="chat-status" id="chatSessionStatus">
+                <span class="status-badge offline" id="chatStatusBadge">Offline</span>
+              </span>
+              <span class="mode-indicator interactive" id="chatModeIndicator" style="display: none;">
+                Interactive Mode
+              </span>
+              <button class="btn btn-icon" id="chatMoreBtn" title="More actions">⋯</button>
+              <div class="chat-more-menu" id="chatMoreGroup">
+                <div class="chat-menu-section">
+                  <div class="chat-menu-header">Connection</div>
+                  <button class="btn btn-menu-item" id="testConnectionBtn">
+                    <span>🔗</span> Test Connection
+                  </button>
+                </div>
+                <div class="chat-menu-section">
+                  <div class="chat-menu-header">Session</div>
+                  <button class="btn btn-menu-item" id="renameChatSessionBtn">
+                    <span>📝</span> Rename
+                  </button>
+                  <button class="btn btn-menu-item" id="clearChatSessionBtn">
+                    <span>🧹</span> Clear
+                  </button>
+                  <button class="btn btn-menu-item" id="deleteChatSessionBtn">
+                    <span>🗑️</span> Delete
+                  </button>
+                </div>
+                <div class="chat-menu-section">
+                  <div class="chat-menu-header">Quick Commands</div>
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/plan">
+                    <span>📋</span> /plan
+                  </button>
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/interactive">
+                    <span>💬</span> /interactive
+                  </button>
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/autopilot">
+                    <span>🚀</span> /autopilot
+                  </button>
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/allow-all">
+                    <span>✅</span> /allow-all
+                  </button>
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/interrupt">
+                    <span>⏹️</span> /interrupt
+                  </button>
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/resume">
+                    <span>🔄</span> /resume
+                  </button>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Connection Error Banner -->
+            <div class="chat-error-banner" id="chatErrorBanner" style="display: none;">
+              <span class="error-icon">⚠️</span>
+              <span class="error-message" id="chatErrorMessage">Connection error</span>
+              <button class="close-btn" id="closeErrorBanner">×</button>
+            </div>
+
+            <!-- Chat Messages -->
+            <div class="chat-messages-container" id="chatMessagesContainer">
+              <!-- Messages will be inserted here -->
+            </div>
+
+            <!-- Chat Input Bar -->
+            <div class="chat-input-bar">
+              <!-- Image Upload Preview Area -->
+              <div class="image-upload-preview" id="imageUploadPreview" style="display: none;">
+                <div class="image-preview-container">
+                  <img id="imagePreview" src="" alt="Preview" />
+                  <button class="image-preview-remove" id="removeImageBtn" title="Remove image">×</button>
+                  <span class="image-preview-name" id="imagePreviewName"></span>
+                </div>
+              </div>
+              
+              <div class="chat-input-wrapper">
+                <input type="file" id="imageUploadInput" accept="image/*" style="display: none;" />
+                <button class="chat-image-btn" id="uploadImageBtn" title="Upload image for analysis" disabled>
+                  📷
+                </button>
+                <textarea class="chat-textarea" id="chatInput" placeholder="Type your message... (Shift+Enter for new line) | Commands: /plan, /interactive, /autopilot, /allow-all, /interrupt" 
+                          rows="1" disabled></textarea>
+                <button class="chat-send-btn" id="sendChatBtn" disabled>Send</button>
+              </div>
+              <div class="chat-command-hints" id="chatCommandHints" style="display: none;">
+                <span class="hint-item" data-cmd="/plan">📋 /plan - Plan mode</span>
+                <span class="hint-item" data-cmd="/interactive">💬 /interactive - Interactive mode</span>
+                <span class="hint-item" data-cmd="/autopilot">🚀 /autopilot - Auto mode</span>
+                <span class="hint-item" data-cmd="/allow-all">✅ /allow-all - Auto-approve</span>
+                <span class="hint-item" data-cmd="/interrupt">⏹️ /interrupt - Stop current</span>
+                <span class="hint-item" data-cmd="/resume">🔄 /resume - Resume session</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reset Password Modal -->
+  <div class="modal-overlay" id="resetModal">
+    <div class="modal">
+      <h3>🔐 Reset Password</h3>
+
+      <div class="success-message" id="resetSuccess"></div>
+
+      <div class="form-group">
+        <label>New Password</label>
+        <div class="password-input-wrapper">
+          <input type="password" id="newPasswordInput" placeholder="Enter new password (or auto-generate)">
+          <button type="button" class="password-toggle" id="toggleNewPassword">👁️</button>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="cancelResetBtn">Cancel</button>
+        <button class="btn btn-secondary" id="autoGenBtn">Auto Generate</button>
+        <button class="btn btn-primary" id="confirmResetBtn">Reset</button>
+      </div>
+
+      <div id="generatedPasswordContainer"></div>
+    </div>
+  </div>
+
+  <!-- Change Email Modal -->
+  <div class="modal-overlay" id="changeEmailModal">
+    <div class="modal">
+      <h3>📧 Change Email</h3>
+
+      <div class="success-message" id="changeEmailSuccess"></div>
+
+      <div class="form-group">
+        <label>New Email</label>
+        <input type="email" id="newEmailInput" placeholder="Enter new email address">
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="cancelChangeEmailBtn">Cancel</button>
+        <button class="btn btn-primary" id="confirmChangeEmailBtn">Change Email</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Saved Commands Modal -->
+  <div class="modal-overlay" id="savedCommandsModal">
+    <div class="modal" style="max-width: 500px;">
+      <h3>💾 Saved Commands</h3>
+
+      <div class="saved-commands-list" id="savedCommandsList">
+        <!-- Commands will be rendered here -->
+      </div>
+
+      <div class="form-group">
+        <label>Add New Command</label>
+        <input type="text" id="newCommandName" placeholder="Command name (e.g., SSH to Server)">
+        <input type="text" id="newCommandText" placeholder="Command (e.g., ssh user@127.0.0.1)" style="margin-top: 8px;">
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="cancelSavedCommandsBtn">Close</button>
+        <button class="btn btn-primary" id="addCommandBtn">Add Command</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Container -->
+  <div class="notification-container" id="notificationContainer"></div>
+
+  <!-- Modern Confirmation Modal -->
+  <div class="modern-modal-overlay" id="confirmModal">
+    <div class="modern-modal">
+      <div class="modern-modal-title" id="confirmModalTitle">Confirm</div>
+      <div class="modern-modal-message" id="confirmModalMessage">Are you sure?</div>
+      <div class="modern-modal-actions">
+        <button class="btn btn-secondary" id="confirmModalCancel">Cancel</button>
+        <button class="btn btn-primary" id="confirmModalConfirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

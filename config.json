@@ -1,0 +1,7 @@
+{
+  "host": "localhost",
+  "port": 3456,
+  "ollama_url": "http://localhost:11434",
+  "mode": "local",
+  "chat_enabled": true
+}
