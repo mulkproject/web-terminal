@@ -1,290 +1,315 @@
-# Web Terminal
+# CLI Web UI
 
-![Version](https://img.shields.io/badge/version-1.0.0--alpha-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+A secure, modern web-based terminal and AI chat interface. Access your terminal, browse files, and chat with an AI coding agent from any browser on your network.
 
-A secure web-based terminal interface with directory browsing, chat assistant, and file management. Access your terminal and files from any browser on your network.
+---
 
-> **Alpha Release:** This is an early release for testing and feedback. Features may change, and bugs may exist. Please report issues via GitHub Issues.
+## 🚀 Quick Start
 
-## What's Included in This Release
+1. **Install Node dependencies:**
+   ```bash
+   npm install
+   ```
+2. **Choose your LLM provider** in `.env` (see [AI Agent & LLM Providers](#-ai-agent--llm-providers)):
+   - **Ollama** (local, free) → `LLM_PROVIDER=ollama`
+   - **NVIDIA NIM** (cloud API) → `LLM_PROVIDER=nvidia` + add your API key
+3. **Run the app:**
+   ```bash
+   python launcher.py
+   ```
+4. Open [http://localhost:3456](http://localhost:3456) and log in with:
+   - **Email:** `admin@mail.com`
+   - **Password:** `admin123`
 
-This is the **source code release** for GitHub. For the standalone offline distribution (with `.exe` and pre-installed `node_modules`), see the [Releases](https://github.com/yourusername/web-terminal/releases) page.
+---
 
-| File | Description |
-|------|-------------|
-| `server.js` | Main web server (start directly with `node server.js`) |
-| `launcher.py` | Python GUI Launcher source (build your own `.exe`) |
-| `launcher-tui.js` | Interactive Terminal UI — Run with `node launcher-tui.js` |
-| `launcher-cli.js` | Command-line launcher — Scriptable/automation |
-| `database.js` | SQLite database module |
-| `copilot-cli-adapter.js` | Copilot SDK CLI adapter |
-| `cli.js` | Command-line interface |
-| `terminal.db` | Fresh SQLite database with default admin account |
-| `config.json` | App configuration (port, chat toggle, etc.) |
-| `launcher-config.json` | Launcher preferences |
-| `public/` | Web frontend files |
+## ✨ Features
 
-## Default Login Credentials
+- 🖥️ **Full Terminal Access** — Browser-based terminal using `xterm.js` and `node-pty`
+- 🤖 **AI Chat with PI Agent** — Conversational coding assistant powered by the **PI Coding Agent** SDK (`@earendil-works/pi-coding-agent`)
+- 📝 **Rich Markdown Rendering** — Agent responses render headers, bold, italic, lists, code blocks, and links in real time
+- 🔊 **Text-to-Speech (TTS)** — Edge-TTS integration; click the speaker icon on any agent message to hear it spoken aloud
+- 📁 **Directory Browser** — Navigate folders, view file details, and open files directly in the terminal
+- 📷 **Image Upload** — Share screenshots and images in chat; the agent can analyze them
+- 🔐 **Secure Authentication** — SQLite-backed user system with bcrypt password hashing and JWT sessions
+- 🔄 **Persistent Chat Sessions** — Conversations are saved to the database and survive page refreshes
+- 📱 **Mobile-Responsive Design** — Works on desktop, tablet, and phone
+- 🌐 **WebSocket Real-Time Updates** — Chat, terminal, and file browser updates stream instantly
 
-- **Email:** `admin@mail.com`
-- **Password:** `admin123`
+---
 
-> **Security Note:** Change the default password after first login.
+## 🤖 AI Agent & LLM Providers
 
-## Installing Dependencies
+### AI Agent Engine: PI Coding Agent
 
-This is a source release. Install dependencies first:
+This project uses the **PI Coding Agent** by [Earendil Works](https://github.com/earendil-works) as the default chat backend.
+
+- **Package:** `@earendil-works/pi-coding-agent`
+- **What it does:** PI Agent is a conversational coding assistant that can analyze code, suggest improvements, explain concepts, and help debug issues. It supports multi-turn sessions with memory of the working directory and uploaded images.
+- **Sessions:** Each chat session maps to a PI Agent session file stored in `pi-agent-sessions/`. Sessions persist across server restarts.
+
+### Supported LLM Providers
+
+| Provider | Type | Setup |
+|----------|------|-------|
+| **Ollama** | Local (free) | Install [Ollama](https://ollama.com/), pull a model (e.g., `llama3.2`), and leave `OLLAMA_HOST` at the default `http://localhost:11434` |
+| **NVIDIA NIM** | Cloud API | Get a free API key from [build.nvidia.com](https://build.nvidia.com/) and set `NVIDIA_API_KEY` |
+
+Switch providers by editing `.env`:
+
+```env
+# Use local Ollama
+LLM_PROVIDER=ollama
+OLLAMA_HOST=http://localhost:11434
+
+# Or use NVIDIA NIM
+LLM_PROVIDER=nvidia
+NVIDIA_API_KEY=nvapi-your-key-here
+```
+
+> **Note:** The PI Agent auto-detects available models. If Ollama is unreachable, make sure the Ollama server is running (`ollama serve`).
+
+---
+
+## 📦 Installation
 
 ```bash
 npm install
 ```
 
-> **Note:** The GitHub Copilot SDK (`@github/copilot-sdk`) is a private package and is not included. If you need chat functionality, install it separately after setting up GitHub package authentication.
+### Prerequisites
 
-## Quick Start
+- **Node.js** v18+ (v20+ recommended)
+- **Python 3.8+** (for the GUI launcher and Edge-TTS worker)
+- **Ollama** (optional, for local LLM)
+- **Edge-TTS Python package** (optional, for TTS):
+  ```bash
+  pip install edge-tts
+  ```
 
-### Option 1: Python GUI Launcher
+---
+
+## ⚙️ Configuration
+
+A clean `.env` file is included in this release. Open it and fill in your credentials:
+
+```env
+# Server
+SERVER_HOST=localhost
+SERVER_PORT=3456
+
+# LLM Provider
+LLM_PROVIDER=ollama
+OLLAMA_HOST=http://localhost:11434
+
+# NVIDIA (optional)
+NVIDIA_API_KEY=your-nvidia-api-key-here
+
+# AI Agent
+AGENT_ENGINE=pi
+
+# Auth
+JWT_SECRET=change-this-to-a-random-secret-string
+ADMIN_EMAIL=admin@mail.com
+ADMIN_PASSWORD=admin123
+
+# Database
+DB_PATH=./terminal.db
+```
+
+> **⚠️ Security Warning:** Never commit the real `.env` file to version control. The included `.gitignore` already protects it.
+
+### Default Login Credentials
+
+- **Email:** `admin@mail.com`
+- **Password:** `admin123`
+
+You can change the admin password after logging in, or modify `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` before first launch.
+
+---
+
+## 🚀 How to Run
+
+### Step 1: Install Dependencies
+
+```bash
+npm install
+```
+
+> This only needs to be done once (or after `package.json` changes).
+
+---
+
+### Option 1: Python GUI Launcher (Recommended)
+
+Double-click `launcher.py` or run from the terminal:
 
 ```bash
 python launcher.py
 ```
 
-- Automatically detects and resolves port conflicts
-- Prevents Windows sleep while running
-- Real-time server logs in the GUI
-- Settings editor built-in
+**What `launcher.py` does:**
+- 🎨 Opens a modern dark-themed GUI window
+- 🔌 Detects if the port is already in use and offers to kill the existing process
+- 🔒 Calls the Windows API to **prevent your PC from sleeping** while the server is running
+- 📊 Shows real-time server logs, status indicators, and a settings editor
+- 🌐 Auto-opens `http://localhost:3456` in your default browser once ready
 
-Then open http://localhost:3456 in your browser.
+**GUI Controls:**
+- **Start Server** — launches the Node.js backend
+- **Stop Server** — gracefully shuts down
+- **Settings** — edit `.env` values directly in the GUI
+- **Logs** — view live server output
+- **Browser** — open the web UI
 
-You can also build a standalone `.exe` using PyInstaller:
-```bash
-pyinstaller --onefile --noconsole --name Web-Terminal-Launcher --icon icon.ico launcher.py
-```
+> **Windows users:** If Python is not in your PATH, use `py launcher.py` instead.
 
-### Option 2: Interactive TUI (Terminal UI)
-
-```bash
-node launcher-tui.js
-```
-
-- Full interactive dashboard in your terminal
-- Visual port conflict detection with kill option
-- Live log viewer
-- Built-in settings editor (navigate with arrow keys)
-- Keyboard shortcuts: **S** Start/Stop, **L** Logs, **R** Refresh, **Q** Quit
-
-### Option 3: CLI Launcher
+### Option 2: Direct Node.js
 
 ```bash
-# Interactive mode
-node launcher-cli.js
-
-# Direct start
-node launcher-cli.js start --direct --port 3456
-
-# Stop server
-node launcher-cli.js stop
-
-# Check status
-node launcher-cli.js status
-```
-
-### Option 4: Direct Node.js
-
-```bash
-node server.js
+npm start
 ```
 
 Or with a custom port:
+
 ```bash
-PORT=8080 node server.js
+SERVER_PORT=8080 npm start
 ```
 
-## Features
+Then open [http://localhost:3456](http://localhost:3456) in your browser.
 
-- 🖥️ Full terminal access via browser using xterm.js
-- 📁 Directory browser with folder navigation
-- 💬 **Chat assistant** (optional, can be enabled/disabled)
-- 🔐 Secure authentication with SQLite database
-- 📱 Mobile-responsive design with PWA support
-- 🔑 Password reset with auto-generate option
-- 👁️ Password reveal toggle
-- 🌙 Dark mode
-- 📤 Image upload and gallery
-- 🚀 Multiple launcher options (GUI, TUI, CLI, Direct)
+---
 
-## Chat Feature
+## 🗂️ Project Structure
 
-The chat assistant is **enabled by default**. To disable it:
+```
+cli-web-ui/
+├── public/
+│   ├── index.html          # Main SPA shell
+│   ├── css/
+│   │   └── style.css       # All UI styling
+│   └── js/
+│       └── app.js          # Frontend logic (terminal, chat, browser)
+├── server.js               # Express + WebSocket server
+├── database.js             # SQLite schema and auth helpers
+├── pi-agent-adapter.js     # PI Agent SDK bridge
+├── seed-admin.js           # One-time admin seeder
+├── edge-tts.py             # Edge-TTS Python worker
+├── launcher.py             # Python GUI launcher
+├── terminal.db             # Pre-seeded SQLite database (admin@mail.com / admin123)
+├── .env                    # Environment template (no secrets)
+└── package.json
+```
 
-### Via Launcher GUI/TUI
-Open the settings panel and toggle **Chat** off.
+---
 
-### Via Config File
-Edit `config.json`:
+## 🌐 WebSocket API (Quick Reference)
+
+The frontend communicates with the backend via WebSocket for real-time features.
+
+**Authentication:**
 ```json
-{
-  "port": 3456,
-  "chat_enabled": false
-}
+{ "type": "auth_token", "token": "your-jwt-token" }
 ```
 
-### Via Environment Variable
+**Chat — Send Message:**
+```json
+{ "type": "chat_send", "sessionId": "uuid", "message": "Hello", "attachments": [] }
+```
+
+**Chat — Stream Delta:**
+```json
+{ "type": "chat_stream_delta", "sessionId": "uuid", "delta": "partial text" }
+```
+
+**Chat — Stream Complete:**
+```json
+{ "type": "chat_stream_complete", "sessionId": "uuid", "content": "full response" }
+```
+
+**Terminal — Start:**
+```json
+{ "type": "start_terminal", "cwd": "." }
+```
+
+**Terminal — Input:**
+```json
+{ "type": "terminal_input", "data": "ls -la\r" }
+```
+
+**Browse — List Directory:**
+```json
+{ "type": "browse_request", "path": "/path/to/dir" }
+```
+
+Full REST + WebSocket documentation is available in `CHAT_API.md`.
+
+---
+
+## 🔊 Text-to-Speech (TTS)
+
+Every agent response includes a **speaker icon** (🔊). Click it to generate speech via Microsoft Edge TTS.
+
+- The backend streams audio generation progress so you know when playback is ready.
+- File paths inside code blocks are preserved during TTS cleanup so spoken paths remain accurate.
+- Markdown syntax (stars, backticks, brackets) is stripped before speaking so the voice output is clean.
+
+Make sure `edge-tts` is installed:
 ```bash
-CHAT_ENABLED=false node server.js
+pip install edge-tts
 ```
 
-> **Note:** Chat requires the GitHub Copilot SDK (`@github/copilot-sdk`). The SDK is a private GitHub package that requires authentication. If the SDK is not installed, the app will still run fine — chat will simply be unavailable even if enabled.
->
-> To add Copilot chat support, install the SDK:
-> ```bash
-> npm install @github/copilot-sdk
-> ```
-> Then restart the server.
+---
 
-## Configuration
+## 🛡️ Security Notes
 
-### `config.json` (Application)
-```json
-{
-  "port": 3456,
-  "host": "localhost",
-  "chat_enabled": true,
-  "theme": "dark"
-}
-```
+- Passwords are hashed with **bcrypt** (salted, 10 rounds).
+- JWT tokens expire after **30 days**.
+- All API and WebSocket routes require a valid **Bearer token**.
+- This tool is designed for **local network / trusted environment** use. Do not expose directly to the public internet without a reverse proxy and HTTPS.
 
-### `launcher-config.json` (Launcher)
-```json
-{
-  "port": 3456,
-  "host": "localhost",
-  "auto_open_browser": true,
-  "prevent_sleep": true,
-  "chat_enabled": true
-}
-```
+---
 
-### Environment Variables (`.env`)
-Create a `.env` file for advanced settings:
-```env
-# Server port (default: 3456)
-PORT=3456
+## 🛠️ Troubleshooting
 
-# Host to bind (default: localhost, use 0.0.0.0 for network access)
-HOST=localhost
+### "Port 3456 is already in use"
 
-# Workspace directory (default: current directory)
-WORKSPACE_DIR=C:\\path\\to\\workspace
+The Python launcher will detect this and show a dialog to kill the old process. Click **Yes**.
 
-# Database path (default: ./terminal.db)
-DB_PATH=./terminal.db
+Or manually:
 
-# Enable/disable chat (default: true)
-CHAT_ENABLED=true
-
-# GitHub token for Copilot chat (optional)
-GITHUB_TOKEN=your_github_token_here
-```
-
-## Launcher Comparison
-
-| Feature | Python GUI | TUI (Terminal) | CLI | Direct |
-|---------|------------|----------------|-----|--------|
-| Interactive Interface | ✅ GUI | ✅ Terminal UI | ❌ Command line | ❌ |
-| Port Conflict Detection | ✅ Dialog | ✅ Visual | ✅ Text | ❌ |
-| Port Kill Option | ✅ Yes | ✅ Yes | ✅ Yes | Manual |
-| Real-time Logs | ✅ Yes | ✅ Yes | PM2 only | Terminal |
-| Settings Editor | ✅ GUI | ✅ TUI | Command args | .env file |
-| Prevents Sleep | ✅ Yes | ✅ (via server) | ✅ (via server) | No |
-| Best For | Desktop use | SSH/Terminal | Scripts | Development |
-
-## Port Conflict Resolution
-
-All launchers detect if the port is already in use:
-
-- **GUI Launcher**: Shows a dialog asking if you want to kill the process
-- **TUI**: Highlights the conflict and offers to kill the process
-- **CLI Launcher**: Prompts interactively or use `--force` to auto-kill
-
-To manually kill a process on a port:
-
-**Windows:**
 ```cmd
+# Windows
 netstat -ano | findstr :3456
 taskkill /F /PID <PID>
 ```
 
-**Linux/Mac:**
+### Server Unreachable After Locking PC
+
+The Python launcher calls the Windows API to keep the system awake. If issues persist:
+
+1. **Windows Settings** → System → Power → set sleep to **Never** when plugged in.
+2. **Device Manager** → Network adapters → your adapter → Power Management → uncheck *"Allow the computer to turn off this device to save power"*.
+
+### Ollama Not Responding
+
+Make sure Ollama is running:
 ```bash
-lsof -ti:3456 | xargs kill -9
+ollama serve
+# In another terminal:
+ollama pull llama3.2
 ```
 
-## Troubleshooting
+### TTS Not Working
 
-### Server Won't Start
-
-1. Check if the port is already in use — the launcher will show this
-2. Make sure Node.js is installed: `node --version`
-3. If dependencies are missing, run `npm install` again.
-
-### Server Unreachable When PC is Locked
-
-The launcher automatically prevents sleep while the server is running. If issues persist:
-
-1. **Check Windows Power Settings:**
-   - Settings > System > Power > Screen and sleep timeouts
-   - Set "When plugged in, PC goes to sleep after" to "Never"
-
-2. **Disable Network Adapter Power Saving:**
-   - Device Manager > Network adapters > Your adapter
-   - Properties > Power Management
-   - Uncheck "Allow the computer to turn off this device to save power"
-
-3. **Allow the port through Windows Firewall** if accessing from another device.
-
-### Chat Not Working
-
-1. Check that `chat_enabled` is `true` in `config.json`
-2. The Copilot SDK (`@github/copilot-sdk`) is not included in this release. Install it separately:
-   ```bash
-   npm install @github/copilot-sdk
-   ```
-3. Ensure you have a valid `GITHUB_TOKEN` in `.env` if using Copilot models.
-
-## Security
-
-- Passwords are hashed with bcrypt
-- Session tokens expire after 30 days
-- All API routes are protected with Bearer token auth
-- **Not designed for public internet exposure** without additional security measures (reverse proxy, HTTPS, etc.)
-- Change the default `admin@mail.com` / `admin123` credentials immediately
-
-## Requirements
-
-- **Node.js** 18+ (required for server and all launchers)
-- **Python 3.x** (for the GUI launcher)
-- Modern web browser
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-Please read [CHANGELOG.md](CHANGELOG.md) for version history.
-
-## License
-
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+Verify Python and `edge-tts` are installed:
+```bash
+python --version
+pip install edge-tts
+```
 
 ---
 
-**Release Version:** v1.0.0-alpha  
-**Release Date:** 2026-05-01  
-**Status:** Alpha — for testing and feedback
+## 📄 License
+
+MIT
