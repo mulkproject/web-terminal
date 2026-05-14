@@ -68,6 +68,7 @@ export function initDatabase() {
       session_name TEXT DEFAULT 'Chat Session',
       model TEXT,
       provider TEXT,
+      agent_engine TEXT DEFAULT 'copilot-sdk',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       last_activity TEXT DEFAULT CURRENT_TIMESTAMP,
       is_active INTEGER DEFAULT 1,
@@ -107,6 +108,33 @@ export function initDatabase() {
   }
   try {
     db.exec(`ALTER TABLE chat_sessions ADD COLUMN working_directory TEXT`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    db.exec(`ALTER TABLE chat_sessions ADD COLUMN agent_engine TEXT DEFAULT 'copilot-sdk'`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  
+  try {
+    db.exec(`ALTER TABLE chat_messages ADD COLUMN prompt_tokens INTEGER DEFAULT 0`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    db.exec(`ALTER TABLE chat_messages ADD COLUMN completion_tokens INTEGER DEFAULT 0`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    db.exec(`ALTER TABLE chat_messages ADD COLUMN total_tokens INTEGER DEFAULT 0`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  
+  try {
+    db.exec(`ALTER TABLE chat_sessions ADD COLUMN pi_session_file TEXT`);
   } catch (e) {
     // Column already exists, ignore
   }
@@ -418,13 +446,13 @@ export function deleteSavedCommand(commandId, userId) {
 /**
  * Create a new chat session
  */
-export function createChatSession(userId, sessionName = 'Chat Session', model = null, provider = null, sdkSessionId = null, workingDirectory = null) {
+export function createChatSession(userId, sessionName = 'Chat Session', model = null, provider = null, sdkSessionId = null, workingDirectory = null, agentEngine = 'copilot-sdk') {
   try {
     const sessionId = randomUUID();
     db.prepare(`
-      INSERT INTO chat_sessions (id, user_id, session_name, model, provider, sdk_session_id, working_directory, created_at, last_activity, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
-    `).run(sessionId, userId, sessionName, model, provider, sdkSessionId, workingDirectory);
+      INSERT INTO chat_sessions (id, user_id, session_name, model, provider, agent_engine, sdk_session_id, working_directory, created_at, last_activity, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+    `).run(sessionId, userId, sessionName, model, provider, agentEngine, sdkSessionId, workingDirectory);
     
     return { success: true, sessionId };
   } catch (err) {
@@ -450,7 +478,7 @@ export function updateChatSessionSdkId(sessionId, sdkSessionId) {
  */
 export function getChatSessionBySdkId(userId, sdkSessionId) {
   return db.prepare(`
-    SELECT id, session_name, model, provider, sdk_session_id, working_directory, created_at, last_activity
+    SELECT id, session_name, model, provider, agent_engine, sdk_session_id, working_directory, created_at, last_activity
     FROM chat_sessions
     WHERE user_id = ? AND sdk_session_id = ?
   `).get(userId, sdkSessionId);
@@ -461,7 +489,7 @@ export function getChatSessionBySdkId(userId, sdkSessionId) {
  */
 export function getChatSessionById(sessionId, userId) {
   return db.prepare(`
-    SELECT id, session_name, model, provider, sdk_session_id, working_directory, created_at, last_activity, is_active
+    SELECT id, session_name, model, provider, agent_engine, sdk_session_id, pi_session_file, working_directory, created_at, last_activity, is_active
     FROM chat_sessions
     WHERE id = ? AND user_id = ?
   `).get(sessionId, userId);
@@ -485,7 +513,7 @@ export function updateChatSessionSummary(sessionId, summary) {
  */
 export function getActiveChatSession(userId) {
   return db.prepare(`
-    SELECT id, session_name, model, provider, sdk_session_id, working_directory, summary, created_at, last_activity
+    SELECT id, session_name, model, provider, agent_engine, sdk_session_id, pi_session_file, working_directory, summary, created_at, last_activity
     FROM chat_sessions
     WHERE user_id = ? AND is_active = 1
     ORDER BY last_activity DESC
@@ -503,7 +531,9 @@ export function getChatSessions(userId, limit = null) {
       s.session_name, 
       s.model, 
       s.provider, 
+      s.agent_engine,
       s.sdk_session_id,
+      s.pi_session_file,
       s.working_directory,
       s.summary,
       s.created_at, 
@@ -539,6 +569,32 @@ export function updateChatSessionModel(sessionId, model, provider = null) {
     SET model = ?, provider = ?, last_activity = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(model, provider, sessionId);
+  
+  return { success: result.changes > 0 };
+}
+
+/**
+ * Update chat session agent engine
+ */
+export function updateChatSessionAgentEngine(sessionId, agentEngine) {
+  const result = db.prepare(`
+    UPDATE chat_sessions
+    SET agent_engine = ?, last_activity = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(agentEngine, sessionId);
+  
+  return { success: result.changes > 0 };
+}
+
+/**
+ * Update chat session PI session file path
+ */
+export function updateChatSessionPiFile(sessionId, piSessionFile) {
+  const result = db.prepare(`
+    UPDATE chat_sessions
+    SET pi_session_file = ?, last_activity = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(piSessionFile, sessionId);
   
   return { success: result.changes > 0 };
 }
@@ -601,13 +657,18 @@ export function renameChatSession(sessionId, userId, newName) {
 /**
  * Add a message to a chat session
  */
-export function addChatMessage(sessionId, role, content) {
+export function addChatMessage(sessionId, role, content, promptTokens = 0, completionTokens = 0, totalTokens = 0) {
   try {
+    // Skip empty/undefined content messages to avoid blank bubbles in history
+    if (!content || (typeof content === 'string' && content.trim().length === 0)) {
+      console.log(`[DB] Skipping empty ${role} message for session ${sessionId}`);
+      return { success: false, message: 'Empty content skipped' };
+    }
     const messageId = randomUUID();
     db.prepare(`
-      INSERT INTO chat_messages (id, session_id, role, content, timestamp)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `).run(messageId, sessionId, role, content);
+      INSERT INTO chat_messages (id, session_id, role, content, timestamp, prompt_tokens, completion_tokens, total_tokens)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
+    `).run(messageId, sessionId, role, content, promptTokens, completionTokens, totalTokens);
     
     // Update session activity
     updateChatSessionActivity(sessionId);
@@ -623,11 +684,27 @@ export function addChatMessage(sessionId, role, content) {
  */
 export function getChatMessages(sessionId) {
   return db.prepare(`
-    SELECT id, role, content, timestamp
+    SELECT id, role, content, timestamp, prompt_tokens, completion_tokens, total_tokens
     FROM chat_messages
     WHERE session_id = ?
     ORDER BY timestamp ASC
   `).all(sessionId);
+}
+
+/**
+ * Get total token usage for a session
+ */
+export function getSessionTokenUsage(sessionId) {
+  const result = db.prepare(`
+    SELECT 
+      COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+      COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+      COALESCE(SUM(total_tokens), 0) as total_tokens
+    FROM chat_messages
+    WHERE session_id = ?
+  `).get(sessionId);
+  
+  return result;
 }
 
 /**

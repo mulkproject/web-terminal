@@ -52,25 +52,28 @@
   </div>
 
   <!-- Main App -->
-  <!-- Mobile Sidebar Toggle -->
-  <button class="sidebar-toggle" id="sidebarToggle">☰</button>
+  <!-- Sidebar Toggle (mobile & desktop) -->
+  <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">☰</button>
   
   <!-- Sidebar Overlay for Mobile -->
   <div class="sidebar-overlay" id="sidebarOverlay"></div>
 
   <div class="app-container" id="appContainer">
     <!-- Sidebar -->
-    <div class="sidebar">
+    <div class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <h1>📁 File Browser</h1>
-        <div class="path-display">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <h1>📁 File Browser</h1>
+          <button class="sidebar-collapse-btn desktop-only" id="desktopCollapseBtn" title="Collapse sidebar">◀</button>
+        </div>
+        <div class="path-display collapsed" id="pathDisplay">
           <div class="current-path" id="currentPath">Loading...</div>
           <button class="copy-path-btn" id="copyPathBtn" title="Copy path to clipboard">📋</button>
         </div>
+        <button class="path-toggle-btn" id="pathToggleBtn" title="Show/hide path">👁️</button>
       </div>
       
       <div class="user-info">
-        <div class="user-email" id="userEmail">Not logged in</div>
         <div class="user-actions">
           <button class="btn btn-secondary btn-small" id="changeEmailBtn">Change Email</button>
           <button class="btn btn-secondary btn-small" id="resetPasswordBtn">Reset Password</button>
@@ -184,7 +187,7 @@
           <!-- Empty State (shown when no session active) -->
           <div class="empty-chat-state" id="emptyChatState">
             <div class="icon">💬</div>
-            <h3>Welcome to Copilot Chat</h3>
+            <h3>Welcome to PI Agent Chat</h3>
             <p>Start a new conversation or select an existing session from the tabs above.</p>
             <button class="btn btn-primary" id="startNewChatBtn" style="margin-top: 20px;">
               <span>➕ New Chat Session</span>
@@ -198,9 +201,23 @@
               <select class="chat-model-select" id="chatModelSelect" title="Select AI Model">
                 <option value="">Loading models...</option>
               </select>
+              <select class="chat-voice-select" id="ttsVoiceSelect" title="Select TTS Voice" style="display: none;">
+                <option value="">Voice: default</option>
+              </select>
               <div style="flex: 1;"></div>
               <span class="chat-status" id="chatSessionStatus">
                 <span class="status-badge offline" id="chatStatusBadge">Offline</span>
+                <span class="token-counter" id="tokenCounter" title="Token usage for this session">
+                  <span class="token-icon">🔢</span>
+                  <span class="token-in" id="tokenIn">0</span>
+                  <span class="token-sep">/</span>
+                  <span class="token-out" id="tokenOut">0</span>
+                  <span class="token-total" id="tokenTotal">0</span>
+                </span>
+               <span class="agent-working" id="agentWorkingIndicator" style="display: none; align-items: center; gap: 4px; margin-left: 8px; font-size: 12px; color: var(--accent-primary);">
+                 <span class="spinner"></span>
+                 <span>Agent working...</span>
+               </span>
               </span>
               <span class="mode-indicator interactive" id="chatModeIndicator" style="display: none;">
                 Interactive Mode
@@ -227,23 +244,11 @@
                 </div>
                 <div class="chat-menu-section">
                   <div class="chat-menu-header">Quick Commands</div>
-                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/plan">
-                    <span>📋</span> /plan
-                  </button>
-                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/interactive">
-                    <span>💬</span> /interactive
-                  </button>
-                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/autopilot">
-                    <span>🚀</span> /autopilot
-                  </button>
-                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/allow-all">
-                    <span>✅</span> /allow-all
-                  </button>
                   <button class="btn btn-menu-item command-hint-btn" data-cmd="/interrupt">
                     <span>⏹️</span> /interrupt
                   </button>
-                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/resume">
-                    <span>🔄</span> /resume
+                  <button class="btn btn-menu-item command-hint-btn" data-cmd="/clear">
+                    <span>🗑️</span> /clear
                   </button>
                 </div>
               </div>
@@ -263,6 +268,12 @@
 
             <!-- Chat Input Bar -->
             <div class="chat-input-bar">
+              <!-- Static working indicator (always visible above input) -->
+              <div class="chat-working-banner" id="chatWorkingBanner" style="display: none;">
+                <span class="spinner"></span>
+                <span>Preparing response...</span>
+              </div>
+
               <!-- Image Upload Preview Area -->
               <div class="image-upload-preview" id="imageUploadPreview" style="display: none;">
                 <div class="image-preview-container">
@@ -277,17 +288,13 @@
                 <button class="chat-image-btn" id="uploadImageBtn" title="Upload image for analysis" disabled>
                   📷
                 </button>
-                <textarea class="chat-textarea" id="chatInput" placeholder="Type your message... (Shift+Enter for new line) | Commands: /plan, /interactive, /autopilot, /allow-all, /interrupt" 
+                <textarea class="chat-textarea" id="chatInput" placeholder="Type your message... (Shift+Enter for new line)" 
                           rows="1" disabled></textarea>
                 <button class="chat-send-btn" id="sendChatBtn" disabled>Send</button>
               </div>
               <div class="chat-command-hints" id="chatCommandHints" style="display: none;">
-                <span class="hint-item" data-cmd="/plan">📋 /plan - Plan mode</span>
-                <span class="hint-item" data-cmd="/interactive">💬 /interactive - Interactive mode</span>
-                <span class="hint-item" data-cmd="/autopilot">🚀 /autopilot - Auto mode</span>
-                <span class="hint-item" data-cmd="/allow-all">✅ /allow-all - Auto-approve</span>
-                <span class="hint-item" data-cmd="/interrupt">⏹️ /interrupt - Stop current</span>
-                <span class="hint-item" data-cmd="/resume">🔄 /resume - Resume session</span>
+                <span class="hint-item" data-cmd="/interrupt">⏹️ /interrupt - Stop generation</span>
+                <span class="hint-item" data-cmd="/clear">🗑️ /clear - Clear messages</span>
               </div>
             </div>
           </div>
@@ -365,6 +372,9 @@
   <!-- Notification Container -->
   <div class="notification-container" id="notificationContainer"></div>
 
+  <!-- Global Audio for TTS -->
+  <audio id="ttsPlayer" preload="none"></audio>
+
   <!-- Modern Confirmation Modal -->
   <div class="modern-modal-overlay" id="confirmModal">
     <div class="modern-modal">
@@ -377,6 +387,7 @@
     </div>
   </div>
 
+  <script src="/js/chat-fix.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>

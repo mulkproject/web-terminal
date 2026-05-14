@@ -1,0 +1,3048 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0a0a0f">
+  <meta name="apple-mobile-web-app-title" content="Cline">
+  <meta name="application-name" content="Cline Web UI">
+  
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect fill='%230a0a0f' width='180' height='180' rx='40'/><text x='50%' y='55%' font-size='100' text-anchor='middle'>🤖</text></svg>">
+  
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+  <title>Cline Web UI</title>
+  <!-- XTerm.js for browser terminal -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg-dark: #0a0a0f;
+      --bg-darker: #050508;
+      --bg-medium: #12121a;
+      --bg-light: #1a1a25;
+      --bg-lighter: #252533;
+      --text-primary: #e0e0e8;
+      --text-muted: #6b6b80;
+      --text-link: #00d4ff;
+      --accent-primary: #00d4ff;
+      --accent-secondary: #7c3aed;
+      --accent-glow: rgba(0, 212, 255, 0.3);
+      --success: #00ff88;
+      --warning: #ffaa00;
+      --error: #ff4466;
+      --safe-area-top: env(safe-area-inset-top, 0px);
+      --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg-light);
+      color: var(--text-primary);
+      font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.375;
+    }
+
+    /* Auth Screen */
+    .auth-screen {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: linear-gradient(135deg, var(--bg-darker) 0%, var(--bg-dark) 50%, var(--bg-medium) 100%);
+    }
+
+    .auth-box {
+      background: var(--bg-medium);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 60px rgba(0, 212, 255, 0.1);
+    }
+
+    .auth-box h1 {
+      font-size: 24px;
+      font-weight: 600;
+      color: #fff;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+
+    .auth-box p {
+      color: var(--text-muted);
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .auth-box input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      border-radius: 6px;
+      background: var(--bg-dark);
+      color: #fff;
+      font-size: 16px;
+      margin-bottom: 16px;
+    }
+
+    .auth-box input:focus {
+      outline: none;
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      color: #fff;
+      width: 100%;
+      border: none;
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, var(--accent-secondary), var(--accent-primary));
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    .btn-secondary {
+      background: var(--bg-lighter);
+      color: var(--text-primary);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-medium);
+    }
+
+    /* App Layout */
+    .app-container {
+      display: none;
+      height: 100vh;
+      flex-direction: column;
+    }
+
+    .app-container.connected {
+      display: flex;
+    }
+
+    .app-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Server List (Left sidebar - Projects) */
+    .servers-container {
+      width: 72px;
+      background: var(--bg-darker);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 12px 0;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+
+    .server-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--bg-medium);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-size: 20px;
+      color: var(--text-primary);
+      position: relative;
+    }
+
+    .server-icon:hover {
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      color: #fff;
+    }
+
+    .server-icon.active {
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      color: #fff;
+    }
+
+    .server-icon.active::before {
+      content: '';
+      position: absolute;
+      left: -16px;
+      width: 4px;
+      height: 48px;
+      background: var(--accent-primary);
+      border-radius: 0 4px 4px 0;
+      box-shadow: 0 0 10px var(--accent-primary);
+    }
+
+    .server-icon.add-server {
+      background: var(--bg-medium);
+      color: var(--success);
+      font-size: 24px;
+    }
+
+    .server-icon.add-server:hover {
+      background: var(--success);
+      color: #fff;
+    }
+
+    /* Channels Sidebar */
+    .channels-container {
+      width: 240px;
+      background: var(--bg-dark);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    .channels-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--bg-darker);
+      font-weight: 600;
+      color: #fff;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .channels-header:hover {
+      background: var(--bg-medium);
+    }
+
+    .channels-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .channel-category {
+      margin-bottom: 16px;
+    }
+
+    .category-header {
+      display: flex;
+      align-items: center;
+      padding: 16px 8px 4px;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    .category-header:hover {
+      color: var(--text-primary);
+    }
+
+    .category-header .arrow {
+      margin-right: 4px;
+      transition: transform 0.2s;
+    }
+
+    .category-header.collapsed .arrow {
+      transform: rotate(-90deg);
+    }
+
+    .channel-item {
+      display: flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 4px;
+      color: var(--text-muted);
+      cursor: pointer;
+      margin-bottom: 2px;
+    }
+
+    .channel-item:hover {
+      background: var(--bg-lighter);
+      color: var(--text-primary);
+    }
+
+    .channel-item.active {
+      background: var(--bg-lighter);
+      color: #fff;
+    }
+
+    .channel-icon {
+      margin-right: 8px;
+      font-size: 18px;
+    }
+
+    .channel-name {
+      flex: 1;
+      font-size: 15px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .channel-actions {
+      display: none;
+      gap: 4px;
+    }
+
+    .channel-item:hover .channel-actions {
+      display: flex;
+    }
+
+    .channel-action-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px;
+      font-size: 14px;
+    }
+
+    .channel-action-btn:hover {
+      color: #fff;
+    }
+
+    .add-channel-btn {
+      display: flex;
+      align-items: center;
+      padding: 8px 12px;
+      color: var(--success);
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .add-channel-btn:hover {
+      color: #fff;
+    }
+
+    /* User Panel */
+    .user-panel {
+      background: var(--bg-darker);
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      position: relative;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 8px;
+      font-size: 14px;
+    }
+
+    .user-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .user-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .user-status {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    
+    .user-avatar {
+      cursor: pointer;
+      position: relative;
+    }
+    
+    .user-menu {
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      background: var(--bg-medium);
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      min-width: 150px;
+      margin-bottom: 8px;
+      z-index: 100;
+    }
+    
+    .user-menu-item {
+      padding: 10px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-primary);
+    }
+    
+    .user-menu-item:hover {
+      background: var(--bg-lighter);
+      border-radius: 4px;
+    }
+
+    /* Main Chat Area */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-light);
+      min-width: 0;
+    }
+
+    .chat-header {
+      height: 48px;
+      background: var(--bg-light);
+      border-bottom: 1px solid var(--bg-darker);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      flex-shrink: 0;
+    }
+
+    .chat-header-icon {
+      color: var(--text-muted);
+      margin-right: 8px;
+    }
+
+    .chat-header-title {
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .chat-header-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--bg-lighter);
+      margin: 0 16px;
+    }
+
+    .chat-header-topic {
+      color: var(--text-muted);
+      font-size: 14px;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 16px;
+    }
+
+    .header-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 20px;
+      padding: 4px;
+    }
+
+    .header-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .model-select {
+      padding: 6px 12px;
+      border-radius: 4px;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .mode-btn {
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      background: var(--bg-dark);
+      color: var(--text-muted);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      cursor: pointer;
+    }
+
+    .mode-btn.active {
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      color: #fff;
+      border-color: transparent;
+    }
+
+    /* Messages Area */
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .messages-wrapper {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding-bottom: 16px;
+    }
+
+    .message-group {
+      display: flex;
+      padding: 2px 48px 2px 72px;
+      position: relative;
+      min-height: 44px;
+    }
+
+    .message-group:hover {
+      background: rgba(4, 4, 5, 0.07);
+    }
+
+    .message-avatar {
+      position: absolute;
+      left: 16px;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+
+    .message-avatar.user {
+      background: linear-gradient(135deg, #5865f2, #00aff4);
+    }
+
+    .message-avatar.assistant {
+      background: linear-gradient(135deg, #3ba55c, #faa61a);
+    }
+
+    .message-body {
+      flex: 1;
+      min-width: 0;
+      padding-left: 8px;
+    }
+
+    .message-header {
+      display: flex;
+      align-items: baseline;
+      margin-bottom: 4px;
+    }
+
+    .message-author {
+      font-weight: 600;
+      color: #fff;
+      margin-right: 8px;
+    }
+
+    .message-timestamp {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .message-content {
+      color: var(--text-primary);
+      word-wrap: break-word;
+      line-height: 1.375;
+    }
+
+    .message-content p {
+      margin-bottom: 8px;
+    }
+
+    .message-content p:last-child {
+      margin-bottom: 0;
+    }
+
+    /* Code Block Styling */
+    .message-content pre {
+      background: var(--bg-dark);
+      border-radius: 4px;
+      margin: 8px 0;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .code-block-header {
+      background: var(--bg-darker);
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .code-block-header .lang {
+      text-transform: lowercase;
+    }
+
+    .copy-code-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .copy-code-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .copy-code-btn.copied {
+      color: var(--success);
+    }
+
+    .message-content pre code {
+      display: block;
+      padding: 12px;
+      font-family: 'Fira Code', 'Consolas', 'Monaco', monospace;
+      font-size: 14px;
+      line-height: 1.5;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .message-content code:not(pre code) {
+      background: var(--bg-dark);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: 'Fira Code', 'Consolas', 'Monaco', monospace;
+      font-size: 14px;
+    }
+
+    /* Inline formatting */
+    .message-content strong {
+      font-weight: 700;
+    }
+
+    .message-content em {
+      font-style: italic;
+    }
+
+    .message-content a {
+      color: var(--text-link);
+      text-decoration: none;
+    }
+
+    .message-content a:hover {
+      text-decoration: underline;
+    }
+
+    .message-content ul, .message-content ol {
+      margin: 8px 0;
+      padding-left: 24px;
+    }
+
+    .message-content li {
+      margin-bottom: 4px;
+    }
+
+    .message-content blockquote {
+      border-left: 4px solid var(--accent-primary);
+      margin: 8px 0;
+      padding-left: 16px;
+      color: var(--text-muted);
+    }
+
+    .message-content h1, .message-content h2, .message-content h3 {
+      margin: 16px 0 8px;
+      color: #fff;
+    }
+
+    .message-content h1 { font-size: 1.5em; }
+    .message-content h2 { font-size: 1.25em; }
+    .message-content h3 { font-size: 1.1em; }
+
+    .message-content hr {
+      border: none;
+      border-top: 1px solid var(--bg-lighter);
+      margin: 16px 0;
+    }
+
+    /* Tool Call Styling */
+    .tool-call {
+      background: var(--bg-medium);
+      border-radius: 4px;
+      margin: 8px 0;
+      overflow: hidden;
+      border: 1px solid rgba(0, 212, 255, 0.1);
+    }
+
+    .tool-call-header {
+      padding: 8px 12px;
+      font-size: 14px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .tool-call-header.pending {
+      color: var(--warning);
+    }
+
+    .tool-call-header.success {
+      color: var(--success);
+    }
+
+    .tool-call-header.error {
+      color: var(--error);
+    }
+
+    .tool-call-content {
+      padding: 12px;
+      background: var(--bg-dark);
+      font-size: 13px;
+      display: none;
+    }
+
+    .tool-call.expanded .tool-call-content {
+      display: block;
+    }
+
+    /* System Message */
+    .system-message {
+      padding: 4px 48px 4px 72px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    /* Input Area */
+    .input-container {
+      padding: 0 16px 16px;
+      background: var(--bg-light);
+      flex-shrink: 0;
+    }
+
+    .input-wrapper {
+      background: var(--bg-lighter);
+      border-radius: 8px;
+      display: flex;
+      align-items: flex-end;
+      padding: 0 16px;
+      border: 1px solid rgba(0, 212, 255, 0.1);
+    }
+
+    .input-wrapper textarea {
+      flex: 1;
+      background: none;
+      border: none;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 16px;
+      resize: none;
+      padding: 12px 0;
+      max-height: 200px;
+      line-height: 1.375;
+    }
+
+    .input-wrapper textarea::placeholder {
+      color: var(--text-muted);
+    }
+
+    .input-wrapper textarea:focus {
+      outline: none;
+    }
+
+    .send-btn {
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      border: none;
+      border-radius: 4px;
+      padding: 8px 16px;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      margin-left: 8px;
+      margin-bottom: 6px;
+    }
+
+    .send-btn:hover:not(:disabled) {
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    .send-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Members Sidebar (Right) */
+    .members-container {
+      width: 240px;
+      background: var(--bg-dark);
+      display: none;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    .members-container.open {
+      display: flex;
+    }
+
+    .members-header {
+      padding: 12px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .member-item {
+      display: flex;
+      align-items: center;
+      padding: 4px 8px;
+      margin: 0 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .member-item:hover {
+      background: var(--bg-lighter);
+    }
+
+    .member-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      margin-right: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .member-name {
+      color: var(--text-primary);
+      font-size: 14px;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--bg-darker);
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #111;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .modal-overlay.open {
+      display: flex;
+    }
+
+    .modal {
+      background: var(--bg-medium);
+      border-radius: 8px;
+      width: 100%;
+      max-width: 440px;
+      max-height: 90vh;
+      overflow: hidden;
+      border: 1px solid rgba(0, 212, 255, 0.2);
+    }
+
+    .modal-header {
+      padding: 16px;
+      text-align: center;
+    }
+
+    .modal-header h3 {
+      font-size: 24px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .modal-header p {
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+
+    .modal-body {
+      padding: 0 16px 16px;
+    }
+
+    .modal-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 24px;
+      cursor: pointer;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      border-radius: 4px;
+      background: var(--bg-dark);
+      color: #fff;
+      font-size: 16px;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--accent-glow);
+      border-color: var(--accent-primary);
+    }
+
+    .modal-footer {
+      padding: 16px;
+      background: var(--bg-darker);
+    }
+
+    .hint {
+      color: var(--text-muted);
+      font-size: 14px;
+      margin-top: 8px;
+    }
+
+    /* Loading dots */
+    .typing-indicator {
+      display: inline-flex;
+      gap: 4px;
+      padding: 8px 12px;
+    }
+
+    .typing-indicator span {
+      width: 8px;
+      height: 8px;
+      background: var(--text-muted);
+      border-radius: 50%;
+      animation: typing 1.4s infinite ease-in-out;
+    }
+
+    .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+    .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+    @keyframes typing {
+      0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+
+    /* Mobile Responsive */
+    @media (max-width: 768px) {
+      /* Hide servers sidebar on mobile - channels sidebar will contain them */
+      .servers-container {
+        display: none !important;
+      }
+
+      /* Channels container becomes full-screen overlay on mobile */
+      .channels-container {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        right: 0;
+        width: 100%;
+        z-index: 100;
+        transition: transform 0.2s ease;
+        transform: translateX(0);
+      }
+
+      /* When channels are hidden (viewing chat), slide them off-screen */
+      .channels-container.hidden {
+        transform: translateX(-100%);
+      }
+
+      /* Show channels button when sidebar is hidden */
+      .mobile-menu-btn.show-channels {
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        color: var(--text-primary);
+        font-size: 20px;
+        cursor: pointer;
+        padding: 8px;
+        border-radius: 4px;
+      }
+
+      .mobile-menu-btn.show-channels:hover {
+        background: var(--bg-lighter);
+      }
+
+      /* Back button when sidebar is open */
+      .mobile-back-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        color: var(--text-primary);
+        font-size: 20px;
+        cursor: pointer;
+        padding: 8px;
+        margin-right: 8px;
+        border-radius: 4px;
+      }
+
+      .mobile-back-btn:hover {
+        background: var(--bg-lighter);
+      }
+
+      .members-container {
+        display: none !important;
+      }
+
+      .message-group {
+        padding: 2px 12px 2px 48px;
+      }
+
+      .message-avatar {
+        left: 8px;
+        width: 32px;
+        height: 32px;
+        font-size: 16px;
+      }
+
+      .header-actions .mode-btn,
+      .header-actions .model-select {
+        display: none;
+      }
+
+      .mobile-menu-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        color: var(--text-primary);
+        font-size: 20px;
+        cursor: pointer;
+        padding: 8px;
+        border-radius: 4px;
+      }
+
+      .mobile-menu-btn:hover {
+        background: var(--bg-lighter);
+      }
+
+      .mobile-overlay {
+        display: none;
+      }
+
+      .input-container {
+        padding: 0 8px 8px;
+      }
+
+      /* Chat header adjustments for mobile */
+      .chat-header {
+        padding: 0 8px;
+      }
+
+      /* Make input area more mobile-friendly */
+      .input-wrapper {
+        gap: 8px;
+      }
+
+      .input-wrapper textarea {
+        font-size: 16px; /* Prevent zoom on iOS */
+      }
+
+      /* Servers should be integrated into channels sidebar */
+      .channels-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* Add mobile-specific servers row inside channels */
+      .mobile-servers-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px;
+        border-bottom: 1px solid var(--bg-darker);
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .mobile-server-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: var(--bg-medium);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: all 0.15s;
+      }
+
+      .mobile-server-icon:hover,
+      .mobile-server-icon.active {
+        border-radius: 12px;
+        background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+        color: #fff;
+      }
+    }
+    
+    /* Desktop - hide mobile-specific elements */
+    @media (min-width: 769px) {
+      .mobile-servers-row {
+        display: none;
+      }
+      
+      .mobile-back-btn {
+        display: none !important;
+      }
+      
+      .channels-container {
+        position: relative;
+        left: auto;
+        top: auto;
+        bottom: auto;
+        right: auto;
+        transform: none;
+        width: 240px;
+      }
+      
+      .channels-container.hidden {
+        transform: none;
+      }
+    }
+
+    /* Terminal Page */
+    .terminal-page {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      background: var(--bg-dark);
+      height: 100%;
+    }
+
+    .terminal-page.active {
+      display: flex;
+    }
+
+    .terminal-header {
+      height: 48px;
+      background: var(--bg-light);
+      border-bottom: 1px solid var(--bg-darker);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      flex-shrink: 0;
+    }
+
+    .terminal-header-title {
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .terminal-header-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--bg-lighter);
+      margin: 0 16px;
+    }
+
+    .terminal-header-path {
+      color: var(--text-muted);
+      font-size: 14px;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .terminal-header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .terminal-restart-btn {
+      background: var(--bg-lighter);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      padding: 4px 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .terminal-restart-btn:hover {
+      background: var(--accent-primary);
+      color: #fff;
+    }
+
+    .terminal-body {
+      flex: 1;
+      overflow: hidden;
+      padding: 4px;
+    }
+
+    .terminal-status-bar {
+      height: 28px;
+      background: var(--bg-medium);
+      border-top: 1px solid var(--bg-darker);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .terminal-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+
+    .terminal-status-dot.connected {
+      background: var(--success);
+    }
+
+    .terminal-status-dot.disconnected {
+      background: var(--error);
+    }
+
+    /* Pull to Refresh */
+    .ptr-indicator {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-medium);
+      transform: translateY(-60px);
+      transition: transform 0.2s ease;
+      z-index: 1000;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .ptr-indicator.visible {
+      transform: translateY(0);
+    }
+
+    .ptr-indicator.refreshing {
+      transform: translateY(0);
+    }
+
+    .ptr-indicator .ptr-spinner {
+      width: 24px;
+      height: 24px;
+      border: 2px solid var(--text-muted);
+      border-top-color: var(--accent-primary);
+      border-radius: 50%;
+      animation: ptr-spin 0.8s linear infinite;
+      margin-right: 8px;
+    }
+
+    .ptr-indicator.refreshing .ptr-spinner {
+      animation: ptr-spin 0.8s linear infinite;
+    }
+
+    @keyframes ptr-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* PWA Install Button */
+    .install-btn {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .install-btn:hover {
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+
+    .install-btn[style*="display: flex"] {
+      display: flex;
+    }
+
+    /* Mobile install button */
+    @media (max-width: 768px) {
+      .install-btn {
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Pull to Refresh Indicator -->
+  <div class="ptr-indicator" id="ptrIndicator">
+    <div class="ptr-spinner"></div>
+    <span>Refreshing...</span>
+  </div>
+  
+  <!-- Auth Screen -->
+  <div class="auth-screen" id="authScreen">
+    <div class="auth-box">
+      <h1>🤖 Cline Web UI</h1>
+      <p>Sign in to continue</p>
+      <input type="email" id="emailInput" placeholder="Email" autofocus>
+      <input type="password" id="passwordInput" placeholder="Password">
+      <button class="btn btn-primary" onclick="connect()">Sign In</button>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div class="app-container" id="appContainer">
+    <div class="app-body">
+      <!-- Server List (Projects) -->
+      <div class="servers-container" id="serversContainer">
+        <div class="server-icon active" onclick="selectServer('default')" title="Home">
+          🤖
+        </div>
+        <div class="server-icon" onclick="showTerminalPage()" title="Terminal" id="terminalServerIcon">
+          💻
+        </div>
+        <!-- Projects will be added here -->
+      </div>
+
+      <!-- Channels Sidebar -->
+      <div class="channels-container" id="channelsContainer">
+        <div class="channels-header" onclick="toggleServerSettings()">
+          <button class="mobile-back-btn" onclick="event.stopPropagation(); hideMobileSidebar();" title="Back to Chat">←</button>
+          <span id="serverName">Cline Workspace</span>
+          <span>⚙️</span>
+        </div>
+        
+        <!-- Mobile Servers Row - shows on mobile only -->
+        <div class="mobile-servers-row" id="mobileServersRow">
+          <div class="mobile-server-icon active" onclick="selectServer('default')" title="Home">🤖</div>
+          <div class="mobile-server-icon" onclick="showTerminalPage(); hideMobileSidebar();" title="Terminal">💻</div>
+          <div class="mobile-server-icon add-server" onclick="event.stopPropagation(); createNewSession()" title="New Session">+</div>
+        </div>
+        
+        <div class="channels-list" id="channelsList">
+          <!-- Sessions will be listed here as channels -->
+          <div class="channel-category">
+            <div class="category-header" onclick="toggleCategory(this)">
+              <span class="arrow">▼</span>
+              <span>Sessions</span>
+            </div>
+            <div class="category-channels" id="sessionsList">
+              <!-- Session channels will be populated here -->
+            </div>
+          </div>
+        </div>
+
+        <div class="user-panel">
+          <div class="user-avatar" onclick="showUserMenu()">👤</div>
+          <div class="user-info">
+            <div class="user-name" id="userName">User</div>
+            <div class="user-status" id="userStatus">Connected</div>
+          </div>
+          <div class="user-menu" id="userMenu" style="display: none;">
+            <div class="user-menu-item" onclick="showChangePasswordModal()">🔑 Change Password</div>
+            <div class="user-menu-item" onclick="logout()">🚪 Logout</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mobile Overlay -->
+      <div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileMenu()"></div>
+
+      <!-- Terminal Page -->
+      <div class="terminal-page" id="terminalPage">
+        <div class="terminal-header">
+          <button class="mobile-menu-btn" onclick="toggleMobileMenu()" style="display:none;">☰</button>
+          <span class="chat-header-icon">💻</span>
+          <span class="terminal-header-title">Terminal</span>
+          <div class="terminal-header-divider"></div>
+          <span class="terminal-header-path" id="terminalPagePath">Not connected</span>
+          <div class="terminal-header-actions">
+            <button class="terminal-restart-btn" onclick="restartTerminal()">🔄 Restart</button>
+          </div>
+        </div>
+        <div class="terminal-body" id="terminalPageBody">
+          <div id="terminalContainer" style="width: 100%; height: 100%;"></div>
+        </div>
+        <div class="terminal-status-bar">
+          <span class="terminal-status-dot disconnected" id="terminalStatusDot"></span>
+          <span id="terminalStatusText">Disconnected</span>
+          <span id="terminalShellInfo"></span>
+        </div>
+      </div>
+
+      <!-- Main Content -->
+      <div class="main-content">
+        <div class="chat-header">
+          <button class="mobile-menu-btn" id="mobileMenuBtn" onclick="toggleMobileMenu()">☰</button>
+          <span class="chat-header-icon">💬</span>
+          <span class="chat-header-title" id="channelName">general</span>
+          <div class="chat-header-divider"></div>
+          <span class="chat-header-topic" id="channelTopic">Start a conversation with Cline</span>
+          <div class="header-actions">
+            <button class="install-btn" id="installBtn" onclick="installPWA()">
+              <span>📥</span>
+              <span>Install</span>
+            </button>
+            <div class="session-id-display" id="sessionIdDisplay" title="Click to copy Session ID" onclick="copySessionId()" style="display: none;">
+              <span style="font-size: 12px; color: #999;">Session:</span>
+              <code id="sessionIdCode" style="font-size: 11px; background: #333; padding: 2px 6px; border-radius: 3px; cursor: pointer;">-</code>
+            </div>
+            <select id="modelSelect" class="model-select" onchange="changeModel(this.value)">
+              <option value="">Loading...</option>
+            </select>
+            <button class="mode-btn active" id="actModeBtn" onclick="setMode('act')">Act</button>
+            <button class="mode-btn" id="planModeBtn" onclick="setMode('plan')">Plan</button>
+
+          </div>
+        </div>
+
+        <div class="messages-container" id="messagesContainer">
+          <div class="messages-wrapper" id="messages">
+            <!-- Messages will be populated here -->
+          </div>
+        </div>
+
+        <div class="input-container">
+          <div class="input-wrapper">
+            <textarea 
+              id="messageInput" 
+              placeholder="Message #general"
+              rows="1"
+              onkeydown="handleKeyDown(event)"
+              oninput="autoResize(this)"
+            ></textarea>
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Members Sidebar -->
+      <div class="members-container" id="membersContainer">
+        <div class="members-header">Members</div>
+        <div class="member-item">
+          <div class="member-avatar">🤖</div>
+          <div class="member-name">Cline AI</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Session Modal -->
+  <div class="modal-overlay" id="newSessionModal" onclick="closeModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3>Create New Session</h3>
+        <p>Start a new conversation in a project folder</p>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Project Folder</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="newWorkspaceInput" placeholder="C:\Users\master\my-project" style="flex: 1;">
+            <button class="btn btn-secondary" onclick="browseFolder()" style="white-space: nowrap;">📁 Browse</button>
+          </div>
+          <div class="hint">Enter the full path to your project folder or click Browse to select</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal()" style="margin-right: 8px;">Cancel</button>
+        <button class="btn btn-primary" onclick="createNewSession()">Create Session</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- XTerm.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  
+  <script>
+    let ws = null;
+    let sessionId = null;
+    let sessionCwd = '';
+    let currentMode = 'act';
+    let terminal = null;
+    let terminalFitAddon = null;
+    let terminalSocket = null;
+
+    // Update session ID display
+    function updateSessionIdDisplay() {
+      const display = document.getElementById('sessionIdDisplay');
+      const code = document.getElementById('sessionIdCode');
+      if (sessionId) {
+        display.style.display = 'flex';
+        display.style.alignItems = 'center';
+        display.style.gap = '6px';
+        code.textContent = sessionId.substring(0, 8) + '...';
+        // Save to localStorage for persistence
+        localStorage.setItem('cline_session_id', sessionId);
+        console.log('Session ID updated:', sessionId);
+      } else {
+        display.style.display = 'none';
+      }
+    }
+
+    // Copy session ID to clipboard
+    function copySessionId() {
+      if (sessionId) {
+        navigator.clipboard.writeText(sessionId).then(() => {
+          const code = document.getElementById('sessionIdCode');
+          const originalText = code.textContent;
+          code.textContent = 'Copied!';
+          code.style.color = '#00ff88';
+          setTimeout(() => {
+            code.textContent = originalText;
+            code.style.color = '';
+          }, 1500);
+        });
+      }
+    }
+    let isProcessing = false;
+    let currentAssistantMessage = null;
+    let lastAuthor = null;
+    let lastTimestamp = null;
+    let projects = {};
+    let authUser = null;
+    let authToken = null;
+
+    // Auto-resize textarea
+    function autoResize(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    }
+
+    // Handle Enter key
+    function handleKeyDown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    }
+
+    // Connect to server
+    async function connect() {
+      // Prevent double-clicks
+      const btn = document.querySelector('.auth-box .btn-primary');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Connecting...';
+      
+      try {
+        const email = document.getElementById('emailInput').value;
+        const password = document.getElementById('passwordInput').value;
+        
+        if (!email || !password) {
+          alert('Please enter email and password');
+          btn.disabled = false;
+          btn.textContent = originalText;
+          return;
+        }
+
+        // Save credentials to localStorage for persistence
+        localStorage.setItem('cline_email', email);
+        localStorage.setItem('cline_password', password);
+        
+        await doConnect(email, password);
+      } finally {
+        // Re-enable button (will be hidden on success anyway)
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    }
+    
+    // Connect with token
+    async function connectWithToken(token) {
+      await doConnect(null, null, token);
+    }
+    
+    // Actual WebSocket connection
+    async function doConnect(email, password, token) {
+      try {
+        // Close any existing socket before opening a new one
+        if (ws) {
+          try {
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+              ws.close();
+            }
+          } catch (closeErr) {
+            console.warn('Error closing previous WebSocket:', closeErr);
+          }
+        }
+
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${wsProtocol}//${location.host}`);
+        
+        ws.onopen = () => {
+          console.log('WebSocket connected');
+          if (token) {
+            ws.send(JSON.stringify({
+              type: 'auth_token',
+              token: token
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: 'auth',
+              email: email,
+              password: password
+            }));
+          }
+        };
+        
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          handleWebSocketMessage(data);
+        };
+        
+        ws.onclose = () => {
+          console.log('WebSocket disconnected');
+          document.getElementById('userStatus').textContent = 'Disconnected';
+        };
+        
+        ws.onerror = (err) => {
+          console.error('WebSocket error:', err);
+          alert('Connection failed');
+        };
+        
+      } catch (err) {
+        console.error('Connection error:', err);
+        alert('Failed to connect: ' + err.message);
+      }
+    }
+    
+    // Logout
+    function logout() {
+      if (ws && authToken) {
+        ws.send(JSON.stringify({ type: 'logout', token: authToken }));
+      }
+      localStorage.removeItem('cline_email');
+      localStorage.removeItem('cline_password');
+      localStorage.removeItem('cline_token');
+      localStorage.removeItem('cline_user');
+      authUser = null;
+      authToken = null;
+      document.getElementById('authScreen').style.display = 'flex';
+      document.getElementById('appContainer').classList.remove('connected');
+      if (ws) ws.close();
+    }
+
+    // Handle WebSocket messages
+    function handleWebSocketMessage(data) {
+      console.log('Received:', data.type, data);
+      
+      switch (data.type) {
+        case 'auth_success':
+          authUser = data.user;
+          authToken = data.token;
+          
+          // Store token in localStorage for persistence
+          if (data.token) {
+            localStorage.setItem('cline_token', data.token);
+            localStorage.setItem('cline_user', JSON.stringify(data.user));
+          }
+          
+          // Update UI
+          document.getElementById('userName').textContent = data.user.email;
+          
+          // Show existing sessions or create new one
+          if (data.sessions && data.sessions.length > 0) {
+            // User has existing sessions - show them
+            document.getElementById('authScreen').style.display = 'none';
+            document.getElementById('appContainer').classList.add('connected');
+            document.getElementById('userStatus').textContent = 'Connected';
+            
+            renderProjects(data.sessions);
+            
+            // Check if we have a saved session ID and it exists in the user's sessions
+            const savedSessionId = localStorage.getItem('cline_session_id');
+            const targetSession = savedSessionId && data.sessions.find(s => s.id === savedSessionId);
+            
+            if (targetSession) {
+              // Load the saved session with its messages
+              addSystemMessage(`Restoring your previous session...`);
+              ws.send(JSON.stringify({ type: 'load_session', sessionId: savedSessionId }));
+            } else {
+              // Auto-load the most recent session (first in the list)
+              const mostRecentSession = data.sessions[0];
+              addSystemMessage(`Loading your last session...`);
+              ws.send(JSON.stringify({ type: 'load_session', sessionId: mostRecentSession.id }));
+            }
+          } else {
+            // No existing sessions - create new one
+            addSystemMessage('Connected! Starting new session...');
+            ws.send(JSON.stringify({ type: 'new_session', cwd: '' }));
+          }
+          break;
+          
+        case 'auth_invalid':
+          // Token invalid - clear storage and show login
+          localStorage.removeItem('cline_token');
+          localStorage.removeItem('cline_user');
+          localStorage.removeItem('cline_password');
+          alert('Session expired. Please login again.');
+          break;
+          
+        case 'logged_out':
+          localStorage.removeItem('cline_token');
+          localStorage.removeItem('cline_user');
+          localStorage.removeItem('cline_password');
+          document.getElementById('authScreen').style.display = 'flex';
+          document.getElementById('appContainer').classList.remove('connected');
+          break;
+          
+        case 'connected':
+          document.getElementById('channelTopic').textContent = data.workspace || 'Ready';
+          break;
+          
+        case 'session_created':
+          sessionId = data.sessionId;
+          updateSessionIdDisplay();
+          document.getElementById('authScreen').style.display = 'none';
+          document.getElementById('appContainer').classList.add('connected');
+          document.getElementById('userStatus').textContent = 'Connected';
+          addSessionChannel(data.sessionId, data.cwd || 'general');
+          selectChannel(data.sessionId);
+          addSystemMessage(`Session created: ${data.sessionId.substring(0, 8)}...`);
+          loadProjects();
+          break;
+          
+        case 'session_loaded':
+          sessionId = data.sessionId;
+          sessionCwd = data.cwd || '';
+          updateSessionIdDisplay();
+          document.getElementById('authScreen').style.display = 'none';
+          document.getElementById('appContainer').classList.add('connected');
+          document.getElementById('userStatus').textContent = 'Connected';
+          selectChannel(data.sessionId);
+          showChatPage();
+          document.getElementById('channelTopic').textContent = data.cwd;
+          if (data.messages && data.messages.length > 0) {
+            clearChat();
+            data.messages.forEach(msg => addMessage(msg.role, msg.content));
+            addSystemMessage(`Loaded ${data.messages.length} messages from history`);
+          }
+          break;
+          
+        case 'sessions_list':
+          renderProjects(data.sessions);
+          break;
+          
+        case 'agent_message_chunk':
+          handleStreamContent(data.payload);
+          break;
+          
+        case 'prompt_complete':
+          isProcessing = false;
+          document.getElementById('sendBtn').disabled = false;
+          if (currentAssistantMessage) {
+            currentAssistantMessage.classList.remove('streaming');
+            // Finalize markdown rendering
+            const textEl = currentAssistantMessage.querySelector('.message-text');
+            if (textEl) {
+              textEl.innerHTML = renderMarkdown(textEl.innerHTML);
+            }
+          }
+          currentAssistantMessage = null;
+          lastAuthor = null;
+          lastTimestamp = null;
+          break;
+          
+        case 'tool_call':
+        case 'tool_call_update':
+          handleToolCall(data.payload);
+          break;
+          
+        case 'error':
+          addSystemMessage('❌ Error: ' + data.message);
+          isProcessing = false;
+          document.getElementById('sendBtn').disabled = false;
+          if (authUser && !sessionId) {
+            let errorHelp = '\n\nTroubleshooting tips:\n';
+            if (data.message?.toLowerCase().includes('authentication') || data.message?.toLowerCase().includes('auth')) {
+              errorHelp += '1. If using cloud Ollama, verify your OLLAMA_TOKEN is valid\n';
+              errorHelp += '2. Consider using local Ollama (OLLAMA_BASE_URL=http://localhost:11434)\n';
+              errorHelp += '3. Check that your Ollama service is running and accessible';
+            } else {
+              errorHelp += '1. Check your provider configuration in .env file\n';
+              errorHelp += '2. Ensure Ollama is running (if using local)\n';
+              errorHelp += '3. Verify your API tokens are valid';
+            }
+            alert('Session creation failed after login: ' + data.message + errorHelp);
+          }
+          break;
+          
+        case 'mode_changed':
+          currentMode = data.mode;
+          updateModeButtons();
+          break;
+          
+        case 'tui_switch':
+          addSystemMessage('✅ ' + data.message);
+          break;
+          
+        case 'projects_list':
+          renderProjects(data.projects);
+          break;
+          
+        case 'project_switched':
+          sessionId = data.sessionId;
+          updateSessionIdDisplay();
+          clearChat();
+          selectChannel(data.sessionId);
+          document.getElementById('channelTopic').textContent = data.cwd;
+          if (data.messages) {
+            data.messages.forEach(msg => addMessage(msg.role, msg.content));
+          }
+          break;
+          
+        case 'terminal_output':
+          handleTerminalOutput(data);
+          break;
+          
+        case 'terminal_exit':
+          if (terminal) {
+            terminal.writeln('\x1b[1;33mTerminal session ended\x1b[0m');
+          }
+          terminalSocket = false;
+          break;
+      }
+    }
+
+    // Handle streaming content
+    function handleStreamContent(payload) {
+      console.log('[FRONTEND] handleStreamContent called with:', JSON.stringify(payload));
+      
+      if (!currentAssistantMessage) {
+        console.log('[FRONTEND] Creating new assistant message');
+        currentAssistantMessage = addMessage('assistant', '');
+        currentAssistantMessage.classList.add('streaming');
+      }
+      
+      const textEl = currentAssistantMessage.querySelector('.message-text');
+      const text = payload?.text || payload?.content?.text || '';
+      console.log('[FRONTEND] Extracted text:', text);
+      if (text) {
+        textEl.innerHTML += escapeHtml(text);
+        scrollToBottom();
+      }
+    }
+
+    // Handle tool calls
+    function handleToolCall(payload) {
+      if (!currentAssistantMessage) {
+        currentAssistantMessage = addMessage('assistant', '');
+      }
+      
+      const status = payload?.status || 'pending';
+      const statusClass = status === 'completed' ? 'success' : status === 'error' ? 'error' : 'pending';
+      const icon = status === 'completed' ? '✅' : status === 'error' ? '❌' : '⏳';
+      
+      const toolEl = document.createElement('div');
+      toolEl.className = 'tool-call';
+      toolEl.innerHTML = `
+        <div class="tool-call-header ${statusClass}" onclick="toggleToolCall(this)">
+          <span>${icon}</span>
+          <span>${payload?.kind || 'Tool Call'}</span>
+        </div>
+        <div class="tool-call-content">
+          <pre><code>${escapeHtml(JSON.stringify(payload, null, 2))}</code></pre>
+        </div>
+      `;
+      
+      const contentEl = currentAssistantMessage.querySelector('.message-content');
+      contentEl.appendChild(toolEl);
+      scrollToBottom();
+    }
+
+    // Toggle tool call expansion
+    function toggleToolCall(header) {
+      const toolCall = header.closest('.tool-call');
+      toolCall.classList.toggle('expanded');
+    }
+
+    // Escape HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Render markdown
+    function renderMarkdown(text) {
+      if (!text) return '';
+      
+      // Code blocks (with language)
+      text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
+        const language = lang || 'plaintext';
+        const escapedCode = escapeHtml(code.trim());
+        return `<pre><div class="code-block-header"><span class="lang">${language}</span><button class="copy-code-btn" onclick="copyCode(this)">📋 Copy</button></div><code>${escapedCode}</code></pre>`;
+      });
+      
+      // Inline code
+      text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+      
+      // Bold
+      text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      
+      // Italic
+      text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      
+      // Links
+      text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+      
+      // Headers
+      text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      
+      // Lists
+      text = text.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+      text = text.replace(/^- (.+)$/gm, '<li>$1</li>');
+      
+      // Blockquotes
+      text = text.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+      
+      // Horizontal rules
+      text = text.replace(/^---$/gm, '<hr>');
+      
+      // Line breaks (preserve them, but not in code blocks)
+      text = text.replace(/\n\n/g, '</p><p>');
+      text = text.replace(/\n/g, '<br>');
+      
+      // Wrap in paragraph
+      if (!text.startsWith('<')) {
+        text = '<p>' + text + '</p>';
+      }
+      
+      return text;
+    }
+
+    // Copy code to clipboard
+    function copyCode(btn) {
+      const code = btn.closest('pre').querySelector('code').textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.textContent = '✓ Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = '📋 Copy';
+          btn.classList.remove('copied');
+        }, 2000);
+      });
+    }
+
+    // Add message to chat
+    function addMessage(role, content) {
+      const messagesEl = document.getElementById('messages');
+      const now = new Date();
+      const timestamp = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      
+      // Check if we can group with the previous message
+      if (lastAuthor === role && lastTimestamp === timestamp) {
+        // Append to current message group
+        const lastGroup = messagesEl.lastElementChild;
+        if (lastGroup) {
+          const textEl = lastGroup.querySelector('.message-text');
+          if (textEl && content) {
+            textEl.innerHTML += renderMarkdown(escapeHtml(content));
+            scrollToBottom();
+            return lastGroup;
+          }
+        }
+      }
+      
+      lastAuthor = role;
+      lastTimestamp = timestamp;
+      
+      const messageEl = document.createElement('div');
+      messageEl.className = 'message-group';
+      
+      const avatar = role === 'user' ? '👤' : '🤖';
+      const author = role === 'user' ? 'You' : 'Cline';
+      const avatarClass = role;
+      
+      messageEl.innerHTML = `
+        <div class="message-avatar ${avatarClass}">${avatar}</div>
+        <div class="message-body">
+          <div class="message-header">
+            <span class="message-author">${author}</span>
+            <span class="message-timestamp">${timestamp}</span>
+          </div>
+          <div class="message-content">
+            <div class="message-text">${renderMarkdown(escapeHtml(content))}</div>
+          </div>
+        </div>
+      `;
+      
+      messagesEl.appendChild(messageEl);
+      scrollToBottom();
+      
+      return messageEl;
+    }
+
+    // Add system message
+    function addSystemMessage(text) {
+      const messagesEl = document.getElementById('messages');
+      const messageEl = document.createElement('div');
+      messageEl.className = 'system-message';
+      messageEl.textContent = text;
+      messagesEl.appendChild(messageEl);
+      scrollToBottom();
+      
+      // Reset grouping after system message
+      lastAuthor = null;
+      lastTimestamp = null;
+    }
+
+    // Scroll to bottom
+    function scrollToBottom() {
+      const container = document.getElementById('messagesContainer');
+      container.scrollTop = container.scrollHeight;
+    }
+
+    // Clear chat
+    function clearChat() {
+      document.getElementById('messages').innerHTML = '';
+      currentAssistantMessage = null;
+      lastAuthor = null;
+      lastTimestamp = null;
+    }
+
+    // Send message
+    function sendMessage() {
+      const input = document.getElementById('messageInput');
+      const content = input.value.trim();
+      
+      if (!content || !ws || isProcessing) return;
+      
+      addMessage('user', content);
+      
+      input.value = '';
+      input.style.height = 'auto';
+      
+      currentAssistantMessage = null;
+      lastAuthor = null;
+      lastTimestamp = null;
+      
+      ws.send(JSON.stringify({
+        type: 'prompt',
+        content: content,
+        mode: currentMode
+      }));
+      
+      isProcessing = true;
+      document.getElementById('sendBtn').disabled = true;
+    }
+
+    // Set mode
+    function setMode(mode) {
+      currentMode = mode;
+      updateModeButtons();
+      
+      if (ws && sessionId) {
+        ws.send(JSON.stringify({ type: 'set_mode', mode }));
+      }
+    }
+
+    // Update mode buttons
+    function updateModeButtons() {
+      document.getElementById('actModeBtn').classList.toggle('active', currentMode === 'act');
+      document.getElementById('planModeBtn').classList.toggle('active', currentMode === 'plan');
+    }
+
+    // Switch to TUI mode - opens browser terminal using xterm.js
+    function switchToTUI() {
+      if (ws && sessionId) {
+        const currentCwd = sessionCwd || document.getElementById('channelName').textContent;
+        openTerminal(currentCwd);
+      } else {
+        alert('Please connect and create a session first');
+      }
+    }
+
+    // Load projects/sessions
+    function loadProjects() {
+      if (ws) {
+        ws.send(JSON.stringify({ type: 'get_projects' }));
+      }
+    }
+
+    // Render projects as channels
+    function renderProjects(projectList) {
+      const container = document.getElementById('sessionsList');
+      container.innerHTML = '';
+      
+      if (!projectList || projectList.length === 0) {
+        container.innerHTML = '<div style="padding: 8px 12px; color: var(--discord-text-muted); font-size: 14px;">No sessions yet</div>';
+        return;
+      }
+      
+      projectList.forEach(project => {
+        const channel = document.createElement('div');
+        channel.className = 'channel-item' + (project.id === sessionId ? ' active' : '');
+        channel.onclick = () => switchProject(project.id);
+        
+        // Handle both cwd and workspace_path property names, with fallback
+        const path = project.cwd || project.workspace_path || '';
+        const folderName = path ? path.split(/[\\/]/).pop() : 'session';
+        
+        channel.innerHTML = `
+          <span class="channel-icon">💬</span>
+          <span class="channel-name">${folderName}</span>
+          <div class="channel-actions">
+            <button class="channel-action-btn" onclick="event.stopPropagation(); deleteProject('${project.id}')">🗑️</button>
+          </div>
+        `;
+        
+        container.appendChild(channel);
+      });
+    }
+
+    // Add session channel
+    function addSessionChannel(id, name) {
+      const folderName = name.split(/[\\/]/).pop() || name;
+      const container = document.getElementById('sessionsList');
+      
+      const channel = document.createElement('div');
+      channel.className = 'channel-item active';
+      channel.id = 'channel-' + id;
+      channel.onclick = () => switchProject(id);
+      
+      channel.innerHTML = `
+        <span class="channel-icon">💬</span>
+        <span class="channel-name">${folderName}</span>
+      `;
+      
+      container.insertBefore(channel, container.firstChild);
+    }
+
+    // Select channel
+    function selectChannel(id) {
+      document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+      const channel = document.getElementById('channel-' + id);
+      if (channel) channel.classList.add('active');
+      
+      const name = channel?.querySelector('.channel-name')?.textContent || 'general';
+      document.getElementById('channelName').textContent = name;
+      
+      // On mobile, close the sidebar when a channel is selected
+      if (detectMobile()) {
+        hideMobileSidebar();
+      }
+    }
+
+    // Switch project
+    function switchProject(projectId) {
+      if (!ws) return;
+      clearChat();
+      showChatPage();
+      ws.send(JSON.stringify({ type: 'switch_project', projectId }));
+      
+      // On mobile, close the sidebar when switching projects
+      if (detectMobile()) {
+        hideMobileSidebar();
+      }
+    }
+
+    // Delete project
+    function deleteProject(projectId) {
+      if (!confirm('Delete this session?')) return;
+      if (!ws) return;
+      ws.send(JSON.stringify({ type: 'delete_project', projectId }));
+      loadProjects();
+    }
+
+    // Toggle server settings
+    function toggleServerSettings() {
+      showModal();
+    }
+
+    // Toggle category
+    function toggleCategory(header) {
+      header.classList.toggle('collapsed');
+      const channels = header.nextElementSibling;
+      if (channels) {
+        channels.style.display = header.classList.contains('collapsed') ? 'none' : 'block';
+      }
+    }
+
+    // Modal functions
+    function showModal() {
+      document.getElementById('newSessionModal').classList.add('open');
+    }
+
+    function closeModal(event) {
+      if (event && event.target !== document.getElementById('newSessionModal')) return;
+      document.getElementById('newSessionModal').classList.remove('open');
+    }
+
+    function createNewSession() {
+      const workspace = document.getElementById('newWorkspaceInput').value.trim();
+      if (!ws) {
+        alert('Not connected');
+        return;
+      }
+      
+      clearChat();
+      ws.send(JSON.stringify({ type: 'new_session', cwd: workspace }));
+      closeModal();
+    }
+
+    // Select server (switch to chat page)
+    function selectServer(id) {
+      showChatPage();
+      document.querySelectorAll('.server-icon').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.mobile-server-icon').forEach(el => el.classList.remove('active'));
+      if (event && event.currentTarget) {
+        event.currentTarget.classList.add('active');
+      }
+      // On mobile, close sidebar after selecting server
+      if (detectMobile()) {
+        hideMobileSidebar();
+      }
+    }
+
+    // Load models
+    async function loadModels() {
+      try {
+        const res = await fetch('/api/ollama/models');
+        const data = await res.json();
+        
+        const select = document.getElementById('modelSelect');
+        select.innerHTML = '';
+        
+        if (data.success && data.models && data.models.length > 0) {
+          data.models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.name;
+            option.textContent = model.name;
+            if (model.name === data.currentModel) option.selected = true;
+            select.appendChild(option);
+          });
+        } else {
+          const option = document.createElement('option');
+          option.value = data.currentModel || 'llama3.2';
+          option.textContent = data.currentModel || 'llama3.2';
+          select.appendChild(option);
+        }
+      } catch (err) {
+        console.error('Failed to load models:', err);
+      }
+    }
+
+    // Change model
+    async function changeModel(modelName) {
+      if (!modelName) return;
+      try {
+        await fetch('/api/ollama/model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelName })
+        });
+        addSystemMessage(`Model changed to: ${modelName}`);
+      } catch (err) {
+        console.error('Failed to change model:', err);
+      }
+    }
+
+    // Initialize
+    window.addEventListener('load', async () => {
+      await loadModels();
+      
+      // Try to restore session ID from localStorage
+      const savedSessionId = localStorage.getItem('cline_session_id');
+      if (savedSessionId) {
+        console.log('Found saved session ID:', savedSessionId);
+        sessionId = savedSessionId;
+        updateSessionIdDisplay();
+      }
+      
+      // Check for saved token and try to auto-connect
+      const savedToken = localStorage.getItem('cline_token');
+      const savedUser = localStorage.getItem('cline_user');
+      const savedEmail = localStorage.getItem('cline_email');
+      const savedPassword = localStorage.getItem('cline_password');
+      
+      if (savedToken && savedUser) {
+        // Try to authenticate with token
+        try {
+          authUser = JSON.parse(savedUser);
+          document.getElementById('emailInput').value = savedEmail || '';
+          await connectWithToken(savedToken);
+        } catch (err) {
+          console.log('Token auth failed, showing login');
+          localStorage.removeItem('cline_token');
+          localStorage.removeItem('cline_user');
+        }
+      } else if (savedEmail && savedPassword) {
+        // Auto-connect with saved credentials
+        document.getElementById('emailInput').value = savedEmail;
+        document.getElementById('passwordInput').value = savedPassword;
+        await connect();
+      }
+    });
+    
+    // Handle page unload - close terminal
+    window.addEventListener('beforeunload', () => {
+    // Handle page unload - close terminal
+      if (terminalSocket) {
+        closeTerminal();
+      }
+    });
+    
+    // Window resize handler - resize terminal when window changes
+    window.addEventListener('resize', () => {
+      if (terminal && terminalFitAddon && document.getElementById('terminalPage').classList.contains('active')) {
+        terminalFitAddon.fit();
+      }
+    });
+    
+    // Handle page unload - close terminal
+    window.addEventListener('beforeunload', () => {
+      if (terminalSocket) {
+        closeTerminal();
+      }
+    });
+
+    // Handle Enter on password field
+    document.getElementById('passwordInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') connect();
+    });
+
+    // Mobile menu functions - Discord-style navigation
+    let isMobileSidebarOpen = false; // Start with sidebar HIDDEN on mobile (show chat first)
+    
+    function detectMobile() {
+      return window.innerWidth <= 768;
+    }
+    
+    function showMobileSidebar() {
+      const channelsContainer = document.getElementById('channelsContainer');
+      channelsContainer.classList.remove('hidden');
+      isMobileSidebarOpen = true;
+      updateMobileMenuButton();
+    }
+    
+    function hideMobileSidebar() {
+      const channelsContainer = document.getElementById('channelsContainer');
+      channelsContainer.classList.add('hidden');
+      isMobileSidebarOpen = false;
+      updateMobileMenuButton();
+    }
+    
+    function toggleMobileMenu() {
+      if (isMobileSidebarOpen) {
+        hideMobileSidebar();
+      } else {
+        showMobileSidebar();
+      }
+    }
+    
+    function closeMobileMenu() {
+      hideMobileSidebar();
+    }
+    
+    function updateMobileMenuButton() {
+      const menuBtn = document.getElementById('mobileMenuBtn');
+      if (menuBtn) {
+        if (isMobileSidebarOpen) {
+          // Show back arrow when sidebar is visible
+          menuBtn.innerHTML = '←';
+          menuBtn.setAttribute('aria-label', 'Back to Chat');
+          menuBtn.classList.remove('show-channels');
+          menuBtn.classList.add('back-btn');
+        } else {
+          // Show hamburger when sidebar is hidden (user is viewing chat)
+          menuBtn.innerHTML = '☰';
+          menuBtn.setAttribute('aria-label', 'Open Sidebar');
+          menuBtn.classList.add('show-channels');
+          menuBtn.classList.remove('back-btn');
+        }
+      }
+    }
+    
+    // Handle window resize to reset mobile state on desktop
+    window.addEventListener('resize', () => {
+      if (terminal && terminalFitAddon && document.getElementById('terminalPage').classList.contains('active')) {
+        terminalFitAddon.fit();
+      }
+      
+      if (window.innerWidth > 768) {
+        // Desktop: always show everything
+        const channelsContainer = document.getElementById('channelsContainer');
+        channelsContainer.classList.remove('hidden');
+      } else {
+        // Mobile: update button state based on sidebar visibility
+        updateMobileMenuButton();
+      }
+    });
+    
+    // Initialize mobile state on load
+    document.addEventListener('DOMContentLoaded', () => {
+      if (detectMobile()) {
+        // On mobile, start with sidebar HIDDEN (show chat first)
+        hideMobileSidebar();
+      }
+    });
+
+    // Auto-approve toggle
+    function toggleAutoApprove(enabled) {
+      if (ws && sessionId) {
+        ws.send(JSON.stringify({ type: 'set_auto_approve', enabled }));
+        addSystemMessage(`Auto-approve ${enabled ? 'enabled' : 'disabled'}`);
+      }
+    }
+
+    // Show user menu
+    function showUserMenu() {
+      const menu = document.getElementById('userMenu');
+      const isVisible = menu.style.display === 'block';
+      menu.style.display = isVisible ? 'none' : 'block';
+      
+      // Close menu when clicking outside
+      if (!isVisible) {
+        setTimeout(() => {
+          document.addEventListener('click', closeUserMenuOnClickOutside);
+        }, 0);
+      }
+    }
+    
+    function closeUserMenuOnClickOutside(e) {
+      const menu = document.getElementById('userMenu');
+      const avatar = document.querySelector('.user-avatar');
+      if (!menu.contains(e.target) && !avatar.contains(e.target)) {
+        menu.style.display = 'none';
+        document.removeEventListener('click', closeUserMenuOnClickOutside);
+      }
+    }
+    
+    // Change password modal
+    function showChangePasswordModal() {
+      document.getElementById('userMenu').style.display = 'none';
+      
+      let modal = document.getElementById('changePasswordModal');
+      if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'changePasswordModal';
+        modal.className = 'modal-overlay open';
+        modal.innerHTML = `
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+              <h3>🔑 Change Password</h3>
+              <p>Update your account password</p>
+            </div>
+            <div class="modal-body">
+              <div class="form-group">
+                <label>Current Password</label>
+                <input type="password" id="currentPasswordInput" placeholder="Enter current password">
+              </div>
+              <div class="form-group">
+                <label>New Password</label>
+                <input type="password" id="newPasswordInput" placeholder="Enter new password">
+              </div>
+              <div class="form-group">
+                <label>Confirm New Password</label>
+                <input type="password" id="confirmPasswordInput" placeholder="Confirm new password">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" onclick="closeChangePasswordModal()">Cancel</button>
+              <button class="btn btn-primary" onclick="changePassword()">Change Password</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => {
+          if (e.target === modal) closeChangePasswordModal();
+        });
+      } else {
+        modal.classList.add('open');
+      }
+    }
+    
+    function closeChangePasswordModal() {
+      const modal = document.getElementById('changePasswordModal');
+      if (modal) modal.classList.remove('open');
+    }
+    
+    async function changePassword() {
+      const currentPassword = document.getElementById('currentPasswordInput').value;
+      const newPassword = document.getElementById('newPasswordInput').value;
+      const confirmPassword = document.getElementById('confirmPasswordInput').value;
+      
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        alert('Please fill in all fields');
+        return;
+      }
+      
+      if (newPassword !== confirmPassword) {
+        alert('New passwords do not match');
+        return;
+      }
+      
+      if (newPassword.length < 6) {
+        alert('Password must be at least 6 characters');
+        return;
+      }
+      
+      try {
+        const res = await fetch('/api/change-password', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authToken}`
+          },
+          body: JSON.stringify({
+            currentPassword,
+            newPassword
+          })
+        });
+        
+        const data = await res.json();
+        
+        if (data.success) {
+          alert('Password changed successfully');
+          localStorage.setItem('cline_password', newPassword);
+          closeChangePasswordModal();
+        } else {
+          alert(data.error || 'Failed to change password');
+        }
+      } catch (err) {
+        console.error('Change password error:', err);
+        alert('Failed to change password: ' + err.message);
+      }
+    }
+
+    // Browse for folder on server
+    async function browseFolder() {
+      // Show folder browser modal
+      showFolderBrowser();
+    }
+    
+    let currentBrowsePath = '';
+    
+    async function showFolderBrowser(startPath = '') {
+      // Create modal if not exists
+      let modal = document.getElementById('folderBrowserModal');
+      if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'folderBrowserModal';
+        modal.className = 'modal-overlay open';
+        modal.innerHTML = `
+          <div class="modal" style="max-width: 600px;">
+            <div class="modal-header">
+              <h3>📁 Browse Folders</h3>
+              <p>Select a folder on the server</p>
+            </div>
+            <div class="modal-body">
+              <div style="margin-bottom: 12px;">
+                <input type="text" id="browsePathInput" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #444; background: #333; color: #fff;" placeholder="Enter path or browse below...">
+              </div>
+              <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                <button class="btn btn-secondary" onclick="goToParentFolder()">⬆️ Up</button>
+                <button class="btn btn-secondary" onclick="refreshFolderBrowser()">🔄 Refresh</button>
+                <button class="btn btn-secondary" onclick="goToWorkspaceRoot()">🏠 Home</button>
+              </div>
+              <div id="folderBrowserList" style="max-height: 300px; overflow-y: auto; border: 1px solid #444; border-radius: 4px; background: #2f3136;">
+                <div style="padding: 20px; text-align: center; color: #999;">Loading...</div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" onclick="closeFolderBrowser()">Cancel</button>
+              <button class="btn btn-primary" onclick="selectFolder()">Select Folder</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => {
+          if (e.target === modal) closeFolderBrowser();
+        });
+      } else {
+        modal.classList.add('open');
+      }
+      
+      currentBrowsePath = startPath || 'C:\\Users\\master';
+      await loadFolderContents(currentBrowsePath);
+    }
+    
+    async function loadFolderContents(path) {
+      const listEl = document.getElementById('folderBrowserList');
+      const pathInput = document.getElementById('browsePathInput');
+      
+      listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">Loading...</div>';
+      pathInput.value = path;
+      currentBrowsePath = path;
+      
+      try {
+        const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+        const data = await res.json();
+        
+        if (!data.success) {
+          listEl.innerHTML = `<div style="padding: 20px; color: #f44;">Error: ${data.error}</div>`;
+          return;
+        }
+        
+        let html = '';
+        
+        // Parent folder link
+        if (data.parent) {
+          html += `<div class="folder-item" onclick="loadFolderContents('${data.parent.replace(/\\/g, '\\\\')}')" style="padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+            <span>📁</span>
+            <span>..</span>
+          </div>`;
+        }
+        
+        // Folders
+        for (const folder of data.folders) {
+          html += `<div class="folder-item" onclick="loadFolderContents('${folder.path.replace(/\\/g, '\\\\')}')" style="padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #3a3d41;">
+            <span>📁</span>
+            <span>${escapeHtml(folder.name)}</span>
+          </div>`;
+        }
+        
+        if (data.folders.length === 0 && !data.parent) {
+          html = '<div style="padding: 20px; text-align: center; color: #999;">No folders found</div>';
+        }
+        
+        listEl.innerHTML = html;
+      } catch (err) {
+        console.error('Browse error:', err);
+        listEl.innerHTML = `<div style="padding: 20px; color: #f44;">Failed to load folders: ${err.message}</div>`;
+      }
+    }
+    
+    async function goToParentFolder() {
+      const pathInput = document.getElementById('browsePathInput');
+      const path = pathInput.value;
+      const parentPath = path.split(/[\\/]/).slice(0, -1).join('\\') || 'C:\\';
+      await loadFolderContents(parentPath);
+    }
+    
+    async function refreshFolderBrowser() {
+      await loadFolderContents(currentBrowsePath);
+    }
+    
+    async function goToWorkspaceRoot() {
+      // Get workspace from server status
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        if (data.workspace) {
+          await loadFolderContents(data.workspace);
+        }
+      } catch (err) {
+        await loadFolderContents('C:\\Users\\master');
+      }
+    }
+    
+    function closeFolderBrowser() {
+      const modal = document.getElementById('folderBrowserModal');
+      if (modal) modal.classList.remove('open');
+    }
+    
+    function selectFolder() {
+      const pathInput = document.getElementById('browsePathInput');
+      document.getElementById('newWorkspaceInput').value = pathInput.value;
+      closeFolderBrowser();
+    }
+
+    // Show chat page (from terminal)
+    function showChatPage() {
+      const terminalPage = document.getElementById('terminalPage');
+      const mainContent = document.getElementById('mainContent');
+      if (terminalPage.classList.contains('active')) {
+        terminalPage.classList.remove('active');
+        mainContent.style.display = 'flex';
+        terminalPage.style.display = 'none';
+      }
+    }
+
+    // Show terminal page
+    function showTerminalPage() {
+      const terminalPage = document.getElementById('terminalPage');
+      const mainContent = document.getElementById('mainContent');
+      terminalPage.classList.add('active');
+      mainContent.style.display = 'none';
+      terminalPage.style.display = 'flex';
+      
+      // Update server icons
+      document.querySelectorAll('.server-icon').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.mobile-server-icon').forEach(el => el.classList.remove('active'));
+      const terminalServerIcon = document.getElementById('terminalServerIcon');
+      if (terminalServerIcon) terminalServerIcon.classList.add('active');
+      const mobileServerIcons = document.querySelectorAll('.mobile-server-icon');
+      if (mobileServerIcons[1]) mobileServerIcons[1].classList.add('active');
+      
+      // Connect terminal when page opens
+      if (terminal && !terminalSocket) {
+        connectTerminal(sessionCwd || '');
+      } else if (!terminal) {
+        openTerminal(sessionCwd || '');
+      } else if (terminal && !terminal.isOpen()) {
+        const container = document.getElementById('terminalContainer');
+        terminal.open(container);
+        terminalFitAddon.fit();
+        connectTerminal(sessionCwd || '');
+      }
+    }
+
+    // Terminal functions (XTerm.js)
+    function openTerminal(cwd) {
+      const terminalPageBody = document.getElementById('terminalPageBody');
+      
+      // Initialize terminal if not already
+      if (!terminal) {
+        terminal = new Terminal({
+          theme: {
+            background: '#1a1a25',
+            foreground: '#e0e0e8',
+            cursor: '#00d4ff',
+            cursorAccent: '#1a1a25',
+            selection: 'rgba(0, 212, 255, 0.3)',
+            black: '#0a0a0f',
+            red: '#ff4466',
+            green: '#00ff88',
+            yellow: '#ffaa00',
+            blue: '#00d4ff',
+            magenta: '#7c3aed',
+            cyan: '#00d4ff',
+            white: '#e0e0e8',
+            brightBlack: '#6b6b80',
+            brightRed: '#ff4466',
+            brightGreen: '#00ff88',
+            brightYellow: '#ffaa00',
+            brightBlue: '#00d4ff',
+            brightMagenta: '#7c3aed',
+            brightCyan: '#00d4ff',
+            brightWhite: '#ffffff'
+          },
+          fontFamily: 'Consolas, Monaco, monospace',
+          fontSize: 14,
+          lineHeight: 1.2,
+          cursorBlink: true,
+          scrollback: 10000
+        });
+        
+        terminalFitAddon = new FitAddon.FitAddon();
+        terminal.loadAddon(terminalFitAddon);
+      }
+      
+      if (!terminalPageBody.querySelector('.xterm')) {
+        terminal.open(terminalPageBody);
+      }
+      
+      // Fit terminal to container
+      setTimeout(() => {
+        terminalFitAddon.fit();
+      }, 100);
+      
+      // Connect to terminal WebSocket
+      connectTerminal(cwd || sessionCwd);
+    }
+    
+    function connectTerminal(cwd) {
+      // Use same WebSocket connection with terminal messages
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.error('WebSocket not connected');
+        return;
+      }
+      
+      // Clear terminal
+      terminal.clear();
+      
+      // Send terminal start message
+      ws.send(JSON.stringify({
+        type: 'terminal_start',
+        cwd: cwd,
+        cols: terminal.cols,
+        rows: terminal.rows
+      }));
+      
+      // Handle terminal input
+      terminal.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'terminal_input',
+            data: data
+          }));
+        }
+      });
+      
+      // Handle terminal resize
+      terminal.onResize(({ cols, rows }) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'terminal_resize',
+            cols: cols,
+            rows: rows
+          }));
+        }
+      });
+      
+      // Store terminal session active state
+      terminalSocket = true;
+      terminal.writeln('\x1b[1;36m🖥️ Terminal connected\x1b[0m');
+      terminal.writeln('\x1b[2;37mProject: ' + cwd + '\x1b[0m');
+      terminal.writeln('');
+    }
+    
+    function closeTerminal() {
+      // Send terminal stop message
+      if (ws && ws.readyState === WebSocket.OPEN && terminalSocket) {
+        ws.send(JSON.stringify({ type: 'terminal_stop' }));
+        terminalSocket = false;
+      }
+      updateTerminalStatus('disconnected');
+    }
+    
+    function restartTerminal() {
+      if (terminal) {
+        terminal.clear();
+      }
+      connectTerminal(sessionCwd || '');
+    }
+    
+    function updateTerminalStatus(status) {
+      const dot = document.getElementById('terminalStatusDot');
+      const text = document.getElementById('terminalStatusText');
+      if (status === 'connected') {
+        dot.classList.remove('disconnected');
+        dot.classList.add('connected');
+        text.textContent = 'Connected';
+      } else {
+        dot.classList.remove('connected');
+        dot.classList.add('disconnected');
+        text.textContent = 'Disconnected';
+      }
+    }
+    
+    // Handle page unload - close terminal
+    window.addEventListener('beforeunload', () => {
+      if (terminalSocket) {
+        closeTerminal();
+      }
+    });
+    
+    // Window resize handler - resize terminal when window changes
+    window.addEventListener('resize', () => {
+      if (terminal && terminalFitAddon && document.getElementById('terminalPage').classList.contains('active')) {
+        terminalFitAddon.fit();
+      }
+    });
+    
+    // Handle terminal output from server
+    function handleTerminalOutput(data) {
+      if (terminal && data.data) {
+        terminal.write(data.data);
+      }
+    }
+    
+    // ============================================
+    // PWA Support
+    // ============================================
+    let deferredPrompt = null;
+    let installButton = null;
+    
+    // Register Service Worker
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then((registration) => {
+            console.log('Service Worker registered:', registration.scope);
+          })
+          .catch((error) => {
+            console.log('Service Worker registration failed:', error);
+          });
+      });
+    }
+    
+    // PWA Install Prompt
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      installButton = document.getElementById('installBtn');
+      if (installButton) {
+        installButton.style.display = 'flex';
+      }
+      console.log('PWA install prompt available');
+    });
+    
+    function installPWA() {
+      if (!deferredPrompt) {
+        console.log('Install prompt not available');
+        return;
+      }
+      
+      deferredPrompt.prompt();
+      deferredPrompt.userChoice.then((choiceResult) => {
+        if (choiceResult.outcome === 'accepted') {
+          console.log('PWA installed');
+        }
+        deferredPrompt = null;
+        if (installButton) {
+          installButton.style.display = 'none';
+        }
+      });
+    }
+    
+    // Hide install button after successful install
+    window.addEventListener('appinstalled', () => {
+      console.log('PWA installed successfully');
+      if (installButton) {
+        installButton.style.display = 'none';
+      }
+      deferredPrompt = null;
+    });
+    
+    // ============================================
+    // Pull to Refresh
+    // ============================================
+    let ptrStartY = 0;
+    let ptrCurrentY = 0;
+    let ptrPulling = false;
+    let ptrRefreshLayout = false;
+    const PTR_THRESHOLD = 60;
+    
+    const ptrIndicator = document.getElementById('ptrIndicator');
+    
+    // Touch start
+    document.addEventListener('touchstart', (e) => {
+      // Only enable PTR when scrolled to top
+      const messagesContainer = document.getElementById('messagesContainer');
+      if (messagesContainer && messagesContainer.scrollTop <= 0) {
+        ptrStartY = e.touches[0].clientY;
+        ptrPulling = true;
+      }
+    }, { passive: true });
+    
+    // Touch move
+    document.addEventListener('touchmove', (e) => {
+      if (!ptrPulling) return;
+      
+      ptrCurrentY = e.touches[0].clientY;
+      const diff = ptrCurrentY - ptrStartY;
+      
+      if (diff > 0 && diff < 150) {
+        const progress = Math.min(diff / PTR_THRESHOLD, 1);
+        
+        if (diff >= PTR_THRESHOLD && !ptrIndicator.classList.contains('visible')) {
+          ptrIndicator.classList.add('visible');
+          ptrIndicator.querySelector('span').textContent = 'Release to refresh';
+        } else if (diff < PTR_THRESHOLD) {
+          ptrIndicator.classList.remove('visible');
+          ptrIndicator.querySelector('span').textContent = 'Pull to refresh';
+        }
+        
+        // Visual feedback
+        ptrIndicator.style.transform = `translateY(${Math.min(diff - 60, 0)}px)`;
+      }
+    }, { passive: true });
+    
+    // Touch end
+    document.addEventListener('touchend', () => {
+      if (!ptrPulling) return;
+      ptrPulling = false;
+      
+      const diff = ptrCurrentY - ptrStartY;
+      
+      if (diff >= PTR_THRESHOLD) {
+        // Trigger refresh
+        ptrIndicator.classList.add('refreshing');
+        ptrIndicator.classList.add('visible');
+        ptrIndicator.querySelector('span').textContent = 'Refreshing...';
+        ptrIndicator.style.transform = 'translateY(0)';
+        
+        // Reconnect WebSocket or reload
+        setTimeout(() => {
+          window.location.reload();
+        }, 500);
+      } else {
+        ptrIndicator.classList.remove('visible');
+        ptrIndicator.style.transform = 'translateY(-60px)';
+      }
+    }, { passive: true });
+  </script>
+</body>
+</html>

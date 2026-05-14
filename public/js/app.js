@@ -25,7 +25,6 @@
     const togglePasswordBtn = document.getElementById('togglePassword');
     const loginBtn = document.getElementById('loginBtn');
     const authError = document.getElementById('authError');
-    const userEmailEl = document.getElementById('userEmail');
     const logoutBtn = document.getElementById('logoutBtn');
     const resetPasswordBtn = document.getElementById('resetPasswordBtn');
     const resetModal = document.getElementById('resetModal');
@@ -63,6 +62,11 @@
     const statusText = document.getElementById('statusText');
     const terminalStatus = document.getElementById('terminalStatus');
 
+    // TTS Elements
+    const ttsPlayer = document.getElementById('ttsPlayer');
+    let currentTtsAudio = null;
+    let playingTtsBtn = null;
+
     // Mobile UI Elements
     const sidebar = document.querySelector('.sidebar');
     const sidebarToggle = document.getElementById('sidebarToggle');
@@ -85,7 +89,7 @@
     const chatActiveUi = document.getElementById('chatActiveUi');
     const chatMessagesContainer = document.getElementById('chatMessagesContainer');
     const chatModelSelect = document.getElementById('chatModelSelect');
-    const chatStatusBadge = document.getElementById('chatStatusBadge');
+        const chatStatusBadge = document.getElementById('chatStatusBadge');
     const chatInput = document.getElementById('chatInput');
     const sendChatBtn = document.getElementById('sendChatBtn');
     const renameChatSessionBtn = document.getElementById('renameChatSessionBtn');
@@ -116,6 +120,8 @@
     let activeChatSessionId = null;
     let chatSessionCounter = 0;
     let chatSessionsLoading = false; // Prevent concurrent load calls
+    let agentWorkingCount = 0; // Track concurrent agent work for indicator
+    let creatingSession = false; // Prevent double session creation
     let availableModels = []; // Available LLM models from server
     let pendingSessionInit = null; // Track session waiting for WebSocket to initialize
 
@@ -191,11 +197,29 @@
     });
 
     // Initialize WebSocket
+    let connecting = false;
+    let reconnectTimeout = null;
+    let processingExistingTerminals = false;
+    let pendingTerminalRecreationTimeouts = [];
+
     function connect() {
+      if (connecting) return;
+      // Cancel any pending reconnect timeout before starting a new connection
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+      connecting = true;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${protocol}//${window.location.host}`);
       
       ws.onopen = () => {
+        connecting = false;
+        // Cancel reconnect timeout since we're now connected
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = null;
+        }
         console.log('WebSocket connected');
         updateStatus(true);
 
@@ -221,7 +245,7 @@
         // Also check if active session needs initialization (e.g., after page reload)
         if (activeChatSessionId) {
           const session = chatSessions.get(activeChatSessionId);
-          if (session && !session.initialized) {
+          if (session && !session.initialized && !session.initializing && session.serverSessionId) {
             console.log('Auto-initializing active session after reconnect:', activeChatSessionId);
             setTimeout(() => initializeChatSession(activeChatSessionId), 200);
           }
@@ -237,14 +261,29 @@
         }
       };
       
+      const thisSocket = ws;
       ws.onclose = () => {
+        // Only process close for the current active WebSocket instance.
+        // If connect() was called again and replaced ws with a newer socket,
+        // ignore this stale close event so we don't spawn extra reconnect timers.
+        if (ws !== thisSocket) {
+          console.log('Ignoring close event for stale WebSocket');
+          return;
+        }
+        ws = null;
+        connecting = false;
         console.log('WebSocket disconnected');
         updateStatus(false);
-        // Don't stop ping interval - let it try to reconnect in background
-        setTimeout(connect, 3000);
+        resetAgentWorkingIndicator();
+        // Clear any pending terminal recreation timeouts to avoid ghost tabs
+        pendingTerminalRecreationTimeouts.forEach(t => clearTimeout(t));
+        pendingTerminalRecreationTimeouts = [];
+        // Schedule reconnect
+        reconnectTimeout = setTimeout(connect, 3000);
       };
       
       ws.onerror = (err) => {
+        // Don't set connecting = false here; let onclose handle it
         console.error('WebSocket error:', err);
         updateStatus(false);
       };
@@ -363,24 +402,43 @@
           break;
           
         case 'existing_terminals':
-          // Server is telling us about terminals that are still running
+          // Guard against concurrent/race processing and duplicate terminal creation
+          if (processingExistingTerminals) break;
+          processingExistingTerminals = true;
           if (data.terminals?.length > 0) {
-            // Clear any stale terminals from our local map first
+            // Cancel any pending recreation timeouts from a previous batch
+            pendingTerminalRecreationTimeouts.forEach(t => clearTimeout(t));
+            pendingTerminalRecreationTimeouts = [];
+            // Only clear terminals that are NOT in the server's list (preserve truly new terminals)
+            const serverTerminalIds = new Set(data.terminals.map(t => t.terminalId));
             terminals.forEach((t, id) => {
-              t.terminal?.dispose();
-              t.element?.remove();
+              if (!serverTerminalIds.has(id)) {
+                t.terminal?.dispose();
+                t.element?.remove();
+                terminals.delete(id);
+              }
             });
-            terminals.clear();
-            activeTerminalId = null;
-            terminalCounter = 0;
+            if (terminals.size === 0) {
+              activeTerminalId = null;
+              terminalCounter = 0;
+            }
             renderTabs();
-            
-            // Reconnect to each existing terminal
+            // Reconnect to each existing terminal with staggered delays
             data.terminals.forEach((t, index) => {
-              setTimeout(() => {
+              if (terminals.has(t.terminalId)) return; // already connected
+              const to = setTimeout(() => {
+                // Re-verify before creating: socket must be open and tab must not exist yet
+                if (ws?.readyState !== WebSocket.OPEN) return;
+                if (terminals.has(t.terminalId)) return;
                 createTerminal(t.cwd, t.terminalId);
               }, index * 100);
+              pendingTerminalRecreationTimeouts.push(to);
             });
+            // Hold the lock long enough for all staggered timeouts to fire
+            const releaseDelay = Math.max(500, data.terminals.length * 100 + 500);
+            setTimeout(() => { processingExistingTerminals = false; }, releaseDelay);
+          } else {
+            setTimeout(() => { processingExistingTerminals = false; }, 500);
           }
           break;
           
@@ -397,6 +455,19 @@
         case 'chat_message_sent':
         case 'chat_error':
         case 'chat_cleared':
+        case 'command_result':
+        case 'permission_request':
+        case 'user_input_request':
+        case 'tool_start':
+        case 'tool_progress':
+        case 'tool_complete':
+        case 'mode_changed':
+        case 'chat_stream_delta':
+        case 'chat_stream_complete':
+        case 'chat_idle':
+        case 'token_usage_update':
+        case 'subagent_started':
+        case 'subagent_completed':
           handleChatMessage(data);
           break;
           
@@ -419,7 +490,7 @@
       appContainer.classList.add('show');
       
       // Update UI
-      userEmailEl.textContent = data.user.email;
+      // (user e-mail is intentionally NOT displayed in the UI for privacy)
       
       // Initialize terminal system if not already
       if (!terminalSystemInitialized) {
@@ -883,6 +954,12 @@
       div.textContent = text;
       return div.innerHTML;
     }
+
+    function stripAnsiCodes(text) {
+      if (typeof text !== 'string') return text;
+      // Remove ANSI escape sequences (e.g. \x1b[32m, \x1b[0m, \x1b[K, etc.)
+      return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    }
     
     // Show context menu for directory items (right-click on folders)
     function showDirectoryContextMenu(event, folderPath, folderName) {
@@ -990,6 +1067,8 @@
       return null;
     }
 
+    // PI Agent is the sole engine
+
     // Modified createChatSession to support working directory
     function createChatSessionWithDirectory(name = null, workingDirectory = null) {
       if (!chatEnabled) {
@@ -1009,6 +1088,7 @@
       if (!sessionModel) {
         showNotification('Models are still loading, please wait a moment and try again.', 'warning');
         loadAvailableModels();
+        loadTtsVoices();
         return null;
       }
       
@@ -1019,11 +1099,19 @@
         id: sessionId,
         name: sessionName,
         model: sessionModel,
+        agentEngine: 'pi-agent',
         messages: [],
         initialized: false,
         initializing: false,
         serverSessionId: null,
-        workingDirectory: workingDirectory // Store the working directory
+        workingDirectory: workingDirectory,
+        // Token tracking
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalTokens: 0,
+        totalCacheReadTokens: 0,
+        totalCacheWriteTokens: 0,
+        totalReasoningTokens: 0
       };
       
       chatSessions.set(sessionId, session);
@@ -1032,13 +1120,14 @@
       // Render the updated tabs
       renderChatTabs();
       
-      // Set as active
+      // Set as active (may be blocked if stream is in progress)
       setActiveChatSession(sessionId);
       
-      // Clear chat messages container for new session
-      const chatMessagesContainer = document.getElementById('chatMessagesContainer');
-      if (chatMessagesContainer) {
-        chatMessagesContainer.innerHTML = '';
+      // Only clear the message container if we actually switched to this session
+      if (activeChatSessionId === sessionId) {
+        const chatMessagesContainer = document.getElementById('chatMessagesContainer');
+        if (chatMessagesContainer) {
+          chatMessagesContainer.innerHTML = '';
         
         // Show welcome message with directory context
         if (workingDirectory) {
@@ -1052,6 +1141,7 @@
             <p style="margin: 16px 0 0 0; font-size: clamp(10px, 2.5vw, 12px); opacity: 0.7;">Type your message below to start chatting about files in this directory.</p>
           `;
           chatMessagesContainer.appendChild(welcomeDiv);
+        }
         }
       }
       
@@ -1134,13 +1224,13 @@
       // Hide no terminal message
       document.getElementById('noTerminalMsg').classList.add('hidden');
 
+      // Open terminal BEFORE making it active so xterm can measure properly
+      term.open(terminalEl);
+      
       // Switch to new terminal (this makes it visible)
       switchToTerminal(terminalId);
 
-      // Now open terminal after it's visible
-      term.open(terminalEl);
-      fit.fit();
-
+      // Keyboard input handler
       term.onData((data) => {
         if (ws?.readyState === WebSocket.OPEN) {
           const t = terminals.get(terminalId);
@@ -1179,17 +1269,24 @@
         return true;
       });
 
-      // Start terminal session on server
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'start_terminal',
-          terminalId,
-          cwd: cwd || currentPath,
-          cols: term.cols,
-          rows: term.rows,
-          shell: shellToUse || selectedShell // Send selected shell type
-        }));
-      }
+      // Defer server spawn until the DOM layout settles and fitAddon has real dimensions.
+      // This prevents the PTY from starting with 0-width (collapsed) cols/rows.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          fit.fit();
+          // Start terminal session on server with correct dimensions
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'start_terminal',
+              terminalId,
+              cwd: cwd || currentPath,
+              cols: term.cols,
+              rows: term.rows,
+              shell: shellToUse || selectedShell // Send selected shell type
+            }));
+          }
+        });
+      });
 
       // Save session state after creating terminal
       saveSessionState();
@@ -1217,6 +1314,15 @@
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             next.fitAddon.fit();
+            // Sync PTY dimensions after fit for already-active terminals
+            if (next.isActive && ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'terminal_resize',
+                terminalId,
+                cols: next.terminal.cols,
+                rows: next.terminal.rows
+              }));
+            }
           });
         });
         terminalInfo.textContent = next.cwd ? `${next.shell || 'Terminal'} - ${next.cwd}` : `${next.shell || 'Terminal'} - Not connected`;
@@ -1664,25 +1770,93 @@
       });
     }
 
-    // Mobile Sidebar Toggle
-    if (sidebarToggle && sidebarOverlay) {
-      sidebarToggle.addEventListener('click', () => {
-        sidebar.classList.toggle('show');
-        sidebarOverlay.classList.toggle('show');
-      });
+    // Sidebar toggles (mobile overlay + desktop collapse)
+    const pathToggleBtn = document.getElementById('pathToggleBtn');
+    const pathDisplay = document.getElementById('pathDisplay');
+    const desktopCollapseBtn = document.getElementById('desktopCollapseBtn');
 
-      sidebarOverlay.addEventListener('click', () => {
+    const SIDEBAR_COLLAPSED_KEY = 'sidebar_collapsed';
+    const PATH_VISIBLE_KEY = 'path_visible';
+
+    function isDesktop() {
+      return window.innerWidth >= 769;
+    }
+
+    function applySidebarCollapseState() {
+      const collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+      if (collapsed && isDesktop()) {
+        appContainer.classList.add('sidebar-collapsed');
+      } else {
+        appContainer.classList.remove('sidebar-collapsed');
+      }
+    }
+
+    function applyPathVisibilityState() {
+      const visible = localStorage.getItem(PATH_VISIBLE_KEY) !== 'false';
+      if (visible) {
+        pathDisplay?.classList.remove('collapsed');
+      } else {
+        pathDisplay?.classList.add('collapsed');
+      }
+    }
+
+    applySidebarCollapseState();
+    applyPathVisibilityState();
+
+    if (pathToggleBtn && pathDisplay) {
+      pathToggleBtn.style.display = 'inline-block';
+      pathToggleBtn.addEventListener('click', () => {
+        const isCollapsed = pathDisplay.classList.toggle('collapsed');
+        localStorage.setItem(PATH_VISIBLE_KEY, String(!isCollapsed));
+      });
+    }
+
+    if (desktopCollapseBtn) {
+      desktopCollapseBtn.addEventListener('click', () => {
+        appContainer.classList.toggle('sidebar-collapsed');
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(appContainer.classList.contains('sidebar-collapsed')));
+      });
+    }
+
+    if (sidebarToggle && sidebarOverlay) {
+      function toggleMobileSidebar() {
+        if (isDesktop()) {
+          appContainer.classList.toggle('sidebar-collapsed');
+          localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(appContainer.classList.contains('sidebar-collapsed')));
+        } else {
+          const isOpen = sidebar.classList.contains('show');
+          if (isOpen) {
+            sidebar.classList.remove('show');
+            sidebarOverlay.classList.remove('show');
+          } else {
+            sidebar.classList.add('show');
+            sidebarOverlay.classList.add('show');
+          }
+        }
+      }
+
+      function closeMobileSidebar() {
         sidebar.classList.remove('show');
         sidebarOverlay.classList.remove('show');
+      }
+
+      sidebarToggle.addEventListener('click', toggleMobileSidebar);
+      // Also handle touch for PWA mobile where click may be delayed
+      sidebarToggle.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        toggleMobileSidebar();
       });
 
-      // Note: Sidebar does NOT auto-collapse on directory navigation
-      // This allows users to continue browsing folders on mobile
-      // Sidebar only closes when:
-      // 1. Clicking the overlay
-      // 2. Clicking "Open Terminal Here" button
-      // 3. Explicitly toggling the sidebar button
+      sidebarOverlay.addEventListener('click', closeMobileSidebar);
+      sidebarOverlay.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        closeMobileSidebar();
+      });
     }
+
+    window.addEventListener('resize', () => {
+      applySidebarCollapseState();
+    });
 
     // PWA Install Button
     let deferredPrompt = null;
@@ -1969,9 +2143,9 @@
     }
 
     // ==========================================
-    // Copilot Chat Functions
+    // PI Agent Chat Functions
     // ==========================================
-    // Multi-Session Copilot Chat Functions
+    // Multi-Session PI Agent Chat Functions
     // ==========================================
 
     // View Toggle Functions
@@ -2023,10 +2197,23 @@
     }
 
     function createChatSession(name = null, model = null) {
+      if (creatingSession) {
+        console.log('⛔ createChatSession blocked: already creating');
+        return null;
+      }
       if (!chatEnabled) {
         showNotification('Chat feature is disabled', 'warning');
         return null;
       }
+      
+      // Require working directory before creating a chat session
+      if (!currentPath) {
+        showNotification('Please select a working directory first. Use the file browser to open a folder, then start a chat.', 'warning');
+        // Switch to terminal view to encourage directory selection
+        showTerminalView();
+        return null;
+      }
+      
       // Limit the number of sessions to prevent UI clutter
       const MAX_SESSIONS = 20;
       if (chatSessions.size >= MAX_SESSIONS) {
@@ -2038,8 +2225,11 @@
       if (!sessionModel) {
         showNotification('Models are still loading, please wait a moment and try again.', 'warning');
         loadAvailableModels();
+        loadTtsVoices();
         return null;
       }
+      
+      creatingSession = true;
       
       const sessionId = generateSessionId();
       const sessionName = name || `Chat ${chatSessions.size + 1}`;
@@ -2048,6 +2238,7 @@
         id: sessionId,
         name: sessionName,
         model: sessionModel,
+        agentEngine: 'pi-agent',
         messages: [],
         initialized: false,
         initializing: false,
@@ -2061,6 +2252,9 @@
       // Session creation is handled by initializeChatSession() in setActiveChatSession
       // No need to send duplicate request here
       
+      // Reset guard after a short delay to allow the init flow to start
+      setTimeout(() => { creatingSession = false; }, 500);
+      
       return session;
     }
 
@@ -2071,6 +2265,30 @@
     }
 
     function setActiveChatSession(sessionId) {
+      // CRITICAL FIX: Check if there's an active stream in ANY session
+      // If so, don't allow tab switching - let the stream complete first
+      if (streamingMessages.size > 0) {
+        const activeStreamSession = Array.from(streamingMessages.keys())[0];
+        if (activeStreamSession !== sessionId) {
+          console.log('[setActiveChatSession] BLOCKED - cannot switch tabs while streaming in', activeStreamSession);
+          showNotification('Please wait for the current response to complete before switching chats', 'warning');
+          return;
+        }
+      }
+      
+      // CRITICAL FIX: Check if there's an active stream in the CURRENT session
+      // If so, don't switch immediately - let the stream complete first
+      if (activeChatSessionId) {
+        const currentSession = chatSessions.get(activeChatSessionId);
+        if (currentSession && streamingMessages.has(activeChatSessionId)) {
+          console.log('[setActiveChatSession] Delaying switch - active stream in progress for', activeChatSessionId);
+          showNotification('Waiting for response to complete before switching...', 'info');
+          // Wait a bit and try again
+          setTimeout(() => setActiveChatSession(sessionId), 1000);
+          return;
+        }
+      }
+      
       // Deactivate previous
       if (activeChatSessionId) {
         const prevTab = document.querySelector(`[data-session-id="${activeChatSessionId}"]`);
@@ -2094,15 +2312,24 @@
         if (chatModelSelect) {
           chatModelSelect.value = session.model;
         }
-        
+                
         renderChatMessages(session);
         
         // Auto-initialize if not initialized and not already initializing
-        if (!session.initialized && !session.initializing) {
-          console.log('🔄 Auto-initializing session:', sessionId);
-          initializeChatSession(sessionId, session.workingDirectory || null);
-          updateChatStatus('connecting');
-          enableChatInput(false);
+        // OR if the session has serverSessionId but needs server reconnect (loaded from API)
+        if ((!session.initialized && !session.initializing) || session._needsServerReconnect) {
+          if (session.serverSessionId) {
+            console.log('🔄 Auto-initializing existing session:', sessionId);
+            // Clear the reconnect flag once we start initializing
+            session._needsServerReconnect = false;
+            initializeChatSession(sessionId, session.workingDirectory || null);
+            updateChatStatus('connecting');
+            enableChatInput(false);
+          } else {
+            console.log('⏳ New session — deferring init until first message:', sessionId);
+            updateChatStatus('online');
+            enableChatInput(true);
+          }
         } else if (session.initializing) {
           console.log('⏳ Session already initializing, skipping:', sessionId);
           updateChatStatus('connecting');
@@ -2173,9 +2400,56 @@
     }
 
     function renderChatMessages(session) {
+      // CRITICAL FIX: Never re-render if there's an active stream for ANY session
+      // This prevents streaming content from disappearing mid-stream
+      if (streamingMessages.size > 0) {
+        const activeStreamingSession = Array.from(streamingMessages.keys())[0];
+        console.log('[renderChatMessages] BLOCKED - active stream in progress for session:', activeStreamingSession);
+        return;
+      }
+      
+      // Also check specific session
+      const activeStream = streamingMessages.get(session.id);
+      if (activeStream) {
+        console.log('[renderChatMessages] Skipping re-render, active stream in progress for', session.id);
+        return;
+      }
+      
+      // Also check if we recently completed ANY stream (within last 1 second)
+      // This prevents race conditions where render is called right after completion
+      const anyRecentStream = Array.from(chatSessions.values()).some(s => 
+        s._lastStreamCompleteTime && (Date.now() - s._lastStreamCompleteTime) < 1000
+      );
+      if (anyRecentStream) {
+        console.log('[renderChatMessages] Skipping re-render, stream just completed');
+        return;
+      }
+      
+      // Check if this session recently completed (within last 500ms)
+      const lastStreamTime = session._lastStreamCompleteTime;
+      if (lastStreamTime && (Date.now() - lastStreamTime) < 500) {
+        console.log('[renderChatMessages] Skipping re-render, stream just completed for', session.id);
+        return;
+      }
+      
+      // Don't re-render active streaming sessions — the streamEl would be destroyed
+      const activeStreamEntry = [...streamingMessages.entries()].find(([_, el]) => el && el.parentNode);
+      if (activeStreamEntry) {
+        const activeStreamSessionId = activeStreamEntry[0];
+        if (activeStreamSessionId === sessionId || activeStreamSessionId === session.serverSessionId) {
+          console.log('[renderChatMessages] Skipping re-render, active stream for', sessionId);
+          return;
+        }
+      }
+
+      // Preserve typing indicator across re-renders (e.g. reconnect with history)
+      const indicator = document.getElementById('typing-indicator');
+      
       chatMessagesContainer.innerHTML = '';
       
-      if (session.messages.length === 0) {
+      if (!Array.isArray(session.messages)) session.messages = [];
+      
+      if (session.messages.length === 0 && !indicator) {
         chatMessagesContainer.innerHTML = `
           <div class="empty-chat-state" style="flex: 1; opacity: 0.7;">
             <p style="font-size: 14px;">Start the conversation by typing a message below.</p>
@@ -2185,21 +2459,106 @@
       }
       
       session.messages.forEach(msg => {
-        appendMessageToContainer(msg.content, msg.role);
+        // Skip messages with empty or missing content to avoid blank bubbles
+        if (msg.content && typeof msg.content === 'string' && msg.content.trim().length > 0) {
+          appendMessageToContainer(msg.content, msg.role);
+        }
       });
+      
+      // Re-attach streaming element if this session has an active stream
+      const streamEl = streamingMessages.get(session.id);
+      if (streamEl && !streamEl.parentNode) {
+        chatMessagesContainer.appendChild(streamEl);
+      }
+      
+      // Restore typing indicator so it survives tab switches / history reloads
+      if (indicator) {
+        chatMessagesContainer.appendChild(indicator);
+      }
       
       scrollToBottom();
     }
 
+    // Robust markdown formatter: escapes HTML, handles triple-backtick code blocks,
+    // headers, bold, italic, links, lists, blockquotes and inline code.
+    function formatMarkdown(text) {
+      if (!text) return '';
+      let html = escapeHtml(text);
+      const parts = html.split('```');
+      let result = '';
+      for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 0) {
+          // Normal text
+          let segment = parts[i];
+
+          // Links [text](url)
+          segment = segment.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--accent-primary);text-decoration:underline;">$1</a>');
+
+          // Headers (process longest first)
+          segment = segment.replace(/^#{6}\s+(.+)$/gm, '<h6 style="margin:6px 0;font-size:12px;opacity:0.85;">$1</h6>');
+          segment = segment.replace(/^#{5}\s+(.+)$/gm, '<h5 style="margin:6px 0;font-size:13px;opacity:0.85;">$1</h5>');
+          segment = segment.replace(/^#{4}\s+(.+)$/gm, '<h4 style="margin:6px 0;font-size:14px;opacity:0.85;">$1</h4>');
+          segment = segment.replace(/^#{3}\s+(.+)$/gm, '<h3 style="margin:8px 0;font-size:15px;opacity:0.9;">$1</h3>');
+          segment = segment.replace(/^#{2}\s+(.+)$/gm, '<h2 style="margin:8px 0;font-size:17px;opacity:0.9;">$1</h2>');
+          segment = segment.replace(/^#{1}\s+(.+)$/gm, '<h1 style="margin:8px 0;font-size:19px;opacity:0.9;">$1</h1>');
+
+          // Bold (**text**)
+          segment = segment.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+          // Italic (*text* or _text_) — avoid converting bold remnants
+          segment = segment.replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '<em>$1</em>');
+          segment = segment.replace(/(?<!\w)_([^_]+)_(?!\w)/g, '<em>$1</em>');
+
+          // Inline code
+          segment = segment.replace(/`([^`]+)`/g, '<code style="background:var(--bg-darker);padding:2px 6px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;">$1</code>');
+
+          // Blockquotes
+          segment = segment.replace(/^>\s+(.+)$/gm, '<blockquote style="border-left:3px solid var(--accent-primary);padding-left:10px;margin:4px 0;opacity:0.9;">$1</blockquote>');
+
+          // Unordered lists
+          segment = segment.replace(/^(\s*)[-*+]\s+(.+)$/gm, (m, indent, content) => `<ul style="margin:2px 0;padding-left:20px;"><li>${content}</li></ul>`);
+
+          // Ordered lists
+          segment = segment.replace(/^(\s*)\d+\.\s+(.+)$/gm, (m, indent, content) => `<ol style="margin:2px 0;padding-left:20px;"><li>${content}</li></ol>`);
+
+          // Horizontal rules
+          segment = segment.replace(/^[\s]*(?:-{3,}|\*{3,}|_{3,})[\s]*$/gm, '<hr style="border:none;border-top:1px solid var(--bg-lighter);margin:10px 0;">');
+
+          // Line breaks
+          segment = segment.replace(/\n/g, '<br>');
+
+          // Merge adjacent list tags into single lists
+          segment = segment.replace(/<\/ul>(?:<br>)*<ul[^>]*>/g, '');
+          segment = segment.replace(/<\/ol>(?:<br>)*<ol[^>]*>/g, '');
+
+          result += segment;
+        } else {
+          // Code block
+          let code = parts[i];
+          let lang = '';
+          const firstNewline = code.indexOf('\n');
+          if (firstNewline !== -1) {
+            lang = code.substring(0, firstNewline).trim();
+            code = code.substring(firstNewline + 1);
+          }
+          code = code.replace(/\n/g, '<br>');
+          const langLabel = lang ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">${escapeHtml(lang)}</div>` : '';
+          result += `<div class="chat-code-block" style="background:var(--bg-darker);padding:12px;border-radius:8px;margin:8px 0;overflow-x:auto;">${langLabel}<code style="font-family:Consolas,Monaco,monospace;font-size:13px;">${code}</code></div>`;
+        }
+      }
+      return result;
+    }
+
     function appendMessageToContainer(content, role, imagePath = null) {
+      // Guard against empty/undefined content creating blank bubbles
+      if (!content || (typeof content === 'string' && content.trim().length === 0)) {
+        return;
+      }
+      
       const messageEl = document.createElement('div');
       messageEl.className = `chat-message ${role}`;
       
-      let formattedContent = content
-        .replace(/```(\w+)?\n?/g, '<div class="chat-code-block"><code>')
-        .replace(/```/g, '</code></div>')
-        .replace(/`([^`]+)`/g, '<code style="background: var(--bg-darker); padding: 2px 6px; border-radius: 3px;">$1</code>')
-        .replace(/\n/g, '<br>');
+      let formattedContent = formatMarkdown(content);
       
       // Build message content
       let messageHTML = formattedContent;
@@ -2218,7 +2577,59 @@
         `;
       }
       
-      messageEl.innerHTML = messageHTML;
+      // Add TTS button for assistant messages
+      if (role === 'assistant') {
+        const ttsBtn = document.createElement('button');
+        ttsBtn.className = 'tts-btn';
+        ttsBtn.innerHTML = '🔊';
+        ttsBtn.title = 'Speak message';
+        ttsBtn.onclick = (e) => {
+          e.stopPropagation();
+          playTts(content, ttsBtn);
+        };
+        messageEl.appendChild(ttsBtn);
+      }
+
+      // Add avatar icon for user and assistant messages
+      if (role === 'user' || role === 'assistant') {
+        const avatarDiv = document.createElement('div');
+        avatarDiv.className = 'message-avatar-header';
+        avatarDiv.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; font-weight: 600; opacity: 0.8;';
+        if (role === 'assistant') {
+          avatarDiv.innerHTML = '<span>🤖</span><span>AI Assistant</span>';
+          avatarDiv.style.color = 'var(--accent-secondary, #a78bfa)';
+        } else {
+          avatarDiv.innerHTML = '<span>👤</span><span>You</span>';
+          avatarDiv.style.color = 'var(--accent-primary, #00d4aa)';
+        }
+        messageEl.appendChild(avatarDiv);
+      }
+
+      const contentSpan = document.createElement('span');
+      contentSpan.className = 'message-content';
+      contentSpan.innerHTML = messageHTML;
+      messageEl.appendChild(contentSpan);
+
+      // Add resend button for user messages
+      if (role === 'user') {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.style.cssText = 'display:flex;gap:8px;margin-top:6px;opacity:0.7;';
+        const resendBtn = document.createElement('button');
+        resendBtn.innerHTML = '↻ Resend';
+        resendBtn.title = 'Resend message';
+        resendBtn.style.cssText = 'background:none;border:none;color:var(--bg-dark);cursor:pointer;font-size:11px;padding:2px 0;';
+        resendBtn.onclick = () => {
+          if (chatInput) {
+            chatInput.value = content;
+            chatInput.style.height = 'auto';
+            chatInput.style.height = chatInput.scrollHeight + 'px';
+            sendChatMessage();
+          }
+        };
+        actionsDiv.appendChild(resendBtn);
+        messageEl.appendChild(actionsDiv);
+      }
+
       messageEl.dataset.timestamp = Date.now();
       chatMessagesContainer.appendChild(messageEl);
       
@@ -2226,6 +2637,80 @@
       requestAnimationFrame(() => {
         scrollToBottom();
       });
+    }
+
+    async function playTts(text, btnElement) {
+      // If already playing this message, stop it
+      if (currentTtsAudio && playingTtsBtn === btnElement) {
+        stopTts();
+        return;
+      }
+
+      // Stop any other playing TTS
+      stopTts();
+
+      btnElement.textContent = '⏳';
+      btnElement.classList.add('loading');
+      playingTtsBtn = btnElement;
+
+      try {
+        const voice = ttsVoiceSelect?.value || '';
+        const body = voice ? JSON.stringify({ text, voice }) : JSON.stringify({ text });
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authToken}`
+          },
+          body
+        });
+
+        if (!res.ok) throw new Error('TTS generation failed');
+
+        const data = await res.json();
+        if (data.success) {
+          currentTtsAudio = new Audio(data.audioUrl);
+          currentTtsAudio.onended = () => {
+            btnElement.textContent = '🔊';
+            btnElement.classList.remove('playing');
+            currentTtsAudio = null;
+            playingTtsBtn = null;
+          };
+          currentTtsAudio.onerror = () => {
+            btnElement.textContent = '❌';
+            btnElement.classList.remove('loading', 'playing');
+            currentTtsAudio = null;
+            playingTtsBtn = null;
+            showNotification('Failed to play audio', 'error');
+          };
+
+          btnElement.textContent = '⏹️';
+          btnElement.classList.remove('loading');
+          btnElement.classList.add('playing');
+          await currentTtsAudio.play();
+        } else {
+          throw new Error(data.error || 'Failed to generate TTS');
+        }
+      } catch (err) {
+        console.error('TTS error:', err);
+        btnElement.textContent = '❌';
+        btnElement.classList.remove('loading');
+        showNotification(err.message, 'error');
+        setTimeout(() => { btnElement.textContent = '🔊'; }, 3000);
+      }
+    }
+
+    function stopTts() {
+      if (currentTtsAudio) {
+        currentTtsAudio.pause();
+        currentTtsAudio.currentTime = 0;
+        currentTtsAudio = null;
+      }
+      if (playingTtsBtn) {
+        playingTtsBtn.textContent = '🔊';
+        playingTtsBtn.classList.remove('playing', 'loading');
+        playingTtsBtn = null;
+      }
     }
 
     function addMessageToActiveSession(content, role, imagePath = null) {
@@ -2405,17 +2890,26 @@
               const session = {
                 id: clientSessionId,
                 name: serverSession.name || 'Untitled Chat',
-                model: serverSession.model || availableModels[0]?.id || 'llama3.2',
-                messages: serverSession.messages ? serverSession.messages.map(m => ({
-                  role: m.role,
-                  content: m.content,
-                  timestamp: m.timestamp || Date.now()
-                })) : [],
-                initialized: false, // Don't auto-mark as initialized, wait for server confirmation
+                model: serverSession.model || (availableModels.length > 0 ? availableModels[0].id : 'default'),
+                agentEngine: 'pi-agent',
+                messages: serverSession.messages
+                  ? serverSession.messages
+                      .filter(m => m.content && typeof m.content === 'string' && m.content.trim().length > 0)
+                      .map(m => ({
+                        role: m.role,
+                        content: m.content,
+                        timestamp: m.timestamp || Date.now()
+                      }))
+                  : [],
+                // FIX: Sessions from API need to re-connect to server
+                // They have serverSessionId but need websocket registration
+                initialized: false,
                 initializing: false,
                 serverSessionId: serverSession.serverSessionId,
                 sdkSessionId: serverSession.sdkSessionId,
-                workingDirectory: serverSession.workingDirectory || null
+                workingDirectory: serverSession.workingDirectory || null,
+                // NEW: Flag to indicate this is an existing session from DB
+                _needsServerReconnect: !!serverSession.serverSessionId
               };
               chatSessions.set(clientSessionId, session);
             });
@@ -2447,11 +2941,15 @@
 
           // Load available models
           await loadAvailableModels();
+          await loadTtsVoices();
 
-          // Show warning if Ollama not configured
-          if (!data.ollamaConfigured && !data.copilotAvailable) {
-            console.warn('No LLM provider configured');
-            showChatError('No LLM provider configured. Please set it in the launcher settings.');
+          // Show warning based on provider
+          if (!data.ollamaConfigured && data.llmProvider === 'ollama') {
+            console.warn('Ollama not configured');
+            showChatError('Ollama not configured. Please check your launcher settings.');
+          } else if (data.llmProvider === 'nvidia' && (!data.availableModels || data.availableModels.length === 0)) {
+            console.warn('NVIDIA NIM not configured or unreachable');
+            showChatError('NVIDIA NIM provider selected but no models available. Please check your NVIDIA API key in the launcher settings and restart the server.');
           }
 
           return data;
@@ -2494,7 +2992,7 @@
               console.warn('No models returned from server, chat may not work');
               const option = document.createElement('option');
               option.value = '';
-              option.textContent = 'No models available - check Ollama';
+              option.textContent = 'No models available - check provider config';
               chatModelSelect.appendChild(option);
               chatModelSelect.disabled = true;
             } else {
@@ -2507,9 +3005,13 @@
               console.log(`Populated model selector with ${availableModels.length} models`);
               chatModelSelect.disabled = false;
               
-              // Restore previous selection if it still exists, otherwise use first model
+              // Restore selection: prefer current value (in case user changed it during async load),
+              // then fall back to the selection captured when loadAvailableModels started
               const modelIds = availableModels.map(m => m.id);
-              if (currentSelection && modelIds.includes(currentSelection)) {
+              const currentValue = chatModelSelect.value;
+              if (currentValue && modelIds.includes(currentValue)) {
+                chatModelSelect.value = currentValue;
+              } else if (currentSelection && modelIds.includes(currentSelection)) {
                 chatModelSelect.value = currentSelection;
               } else {
                 // Try to get default from server, otherwise use first model
@@ -2518,8 +3020,11 @@
                 });
                 if (statusResponse.ok) {
                   const statusData = await statusResponse.json();
-                  if (statusData.ollamaModel && modelIds.includes(statusData.ollamaModel)) {
-                    chatModelSelect.value = statusData.ollamaModel;
+                  const providerDefault = statusData.llmProvider === 'ollama' ? statusData.ollamaModel :
+                                         statusData.llmProvider === 'nvidia' ? (statusData.availableModels?.[0]?.id || statusData.availableModels?.[0]) :
+                                         statusData.availableModels?.[0]?.id || statusData.availableModels?.[0];
+                  if (providerDefault && modelIds.includes(providerDefault)) {
+                    chatModelSelect.value = providerDefault;
                   } else {
                     chatModelSelect.value = availableModels[0]?.id || '';
                   }
@@ -2533,6 +3038,67 @@
       } catch (err) {
         console.error('Failed to load available models:', err);
       }
+    }
+
+    // Load available TTS voices from server
+    async function loadTtsVoices() {
+      try {
+        if (!authToken) {
+          console.warn('No auth token available, cannot load TTS voices');
+          return;
+        }
+
+        const response = await fetch('/api/tts/voices', {
+          headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const voices = data.voices || [];
+          const voiceSelect = document.getElementById('ttsVoiceSelect');
+          if (!voiceSelect) return;
+
+          voiceSelect.innerHTML = '';
+          if (voices.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'Voice: default';
+            voiceSelect.appendChild(option);
+            voiceSelect.style.display = 'none';
+          } else {
+            const defaultOption = document.createElement('option');
+            defaultOption.value = '';
+            defaultOption.textContent = 'Voice: default';
+            voiceSelect.appendChild(defaultOption);
+
+            voices.forEach(voice => {
+              const option = document.createElement('option');
+              option.value = voice.id;
+              option.textContent = voice.name || voice.id;
+              voiceSelect.appendChild(option);
+            });
+
+            const savedVoice = localStorage.getItem('ttsVoice') || '';
+            if (savedVoice && voices.some(v => v.id === savedVoice)) {
+              voiceSelect.value = savedVoice;
+            }
+            voiceSelect.style.display = 'block';
+            console.log(`Populated TTS voice selector with ${voices.length} voices`);
+          }
+        } else {
+          console.warn('Failed to load TTS voices:', response.status);
+        }
+      } catch (err) {
+        console.error('Failed to load TTS voices:', err);
+      }
+    }
+
+    // Persist selected voice
+    const ttsVoiceSelect = document.getElementById('ttsVoiceSelect');
+    if (ttsVoiceSelect) {
+      ttsVoiceSelect.addEventListener('change', () => {
+        localStorage.setItem('ttsVoice', ttsVoiceSelect.value);
+      });
     }
 
     // Show chat error banner
@@ -2650,9 +3216,10 @@
           type: 'chat_session_reconnect',
           sessionId: session.id,
           serverSessionId: session.serverSessionId,
-          sdkSessionId: session.sdkSessionId,  // Include SDK session ID for resumption
+          sdkSessionId: session.sdkSessionId,
           name: session.name,
           model: session.model,
+          agentEngine: 'pi-agent',
           workingDirectory: session.workingDirectory || null
         }));
       } else {
@@ -2667,7 +3234,8 @@
             sessionId: session.id,
             name: session.name,
             model: session.model,
-            workingDirectory: effectiveWorkingDirectory // Pass working directory to server
+            agentEngine: 'pi-agent',
+            workingDirectory: effectiveWorkingDirectory
           };
           console.log('Sending WebSocket message:', message);
           ws.send(JSON.stringify(message));
@@ -2751,6 +3319,7 @@
       
       // Add typing indicator while waiting for response
       addTypingIndicator();
+      incrementAgentWork();
       
       // If session not initialized, initialize it first and queue the message
       if (!session.initialized) {
@@ -2792,8 +3361,11 @@
       indicator.id = 'typing-indicator';
       indicator.className = 'chat-message assistant typing-indicator';
       indicator.innerHTML = `
+        <div class="message-avatar-header" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:12px;font-weight:600;opacity:0.8;color:var(--accent-secondary,#a78bfa)">
+          <span>🤖</span><span>AI Assistant</span>
+        </div>
         <div class="typing-bubble"></div>
-        <span class="typing-text">Preparing response...</span>
+        <span class="typing-text">Agent is working...</span>
       `;
       container.appendChild(indicator);
       scrollToBottom();
@@ -2802,11 +3374,42 @@
     // Remove typing indicator
     function removeTypingIndicator() {
       const indicator = document.getElementById('typing-indicator');
-      if (indicator) {
+      // Guard: only remove if it still has the typing-indicator class
+      // (handleStreamDelta transforms it into a streaming bubble and removes the id,
+      //  but belt-and-suspenders in case of race conditions)
+      if (indicator && indicator.classList.contains('typing-indicator')) {
         indicator.remove();
       }
     }
 
+    // Agent Working Indicator
+    function showAgentWorkingIndicator() {
+      agentWorkingCount++;
+      const el = document.getElementById('agentWorkingIndicator');
+      if (el) el.style.display = 'flex';
+      const banner = document.getElementById('chatWorkingBanner');
+      if (banner) banner.style.display = 'flex';
+    }
+    function hideAgentWorkingIndicator() {
+      agentWorkingCount = Math.max(0, agentWorkingCount - 1);
+      if (agentWorkingCount === 0) {
+        const el = document.getElementById('agentWorkingIndicator');
+        if (el) el.style.display = 'none';
+        const banner = document.getElementById('chatWorkingBanner');
+        if (banner) banner.style.display = 'none';
+      }
+    }
+    function resetAgentWorkingIndicator() {
+      agentWorkingCount = 0;
+      const el = document.getElementById('agentWorkingIndicator');
+      if (el) el.style.display = 'none';
+      const banner = document.getElementById('chatWorkingBanner');
+      if (banner) banner.style.display = 'none';
+    }
+
+    // Alias functions for legacy call sites (fixes "Preparing response..." hang)
+    function incrementAgentWork() { showAgentWorkingIndicator(); }
+    function decrementAgentWork() { hideAgentWorkingIndicator(); }
     // Event Handlers
     viewTerminalBtn?.addEventListener('click', showTerminalView);
     viewChatBtn?.addEventListener('click', showChatView);
@@ -2822,8 +3425,8 @@
     // Mobile More Menu Toggle
     // ===========================
     function closeAllMobileMenus() {
-      document.querySelectorAll('.mobile-more-group.show').forEach(g => g.classList.remove('show'));
-      document.querySelectorAll('.mobile-more-btn.active').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.mobile-more-group.show, .chat-more-menu.show').forEach(g => g.classList.remove('show'));
+      document.querySelectorAll('.mobile-more-btn.active, .btn-icon.active').forEach(b => b.classList.remove('active'));
     }
     
     function toggleMobileMenu(btn, group) {
@@ -2863,7 +3466,8 @@
     });
     
     document.addEventListener('click', (e) => {
-      if (!e.target.closest('.mobile-more-btn') && !e.target.closest('.mobile-more-group')) {
+      if (!e.target.closest('.mobile-more-btn') && !e.target.closest('.mobile-more-group') &&
+          !e.target.closest('.btn-icon') && !e.target.closest('.chat-more-menu')) {
         closeAllMobileMenus();
       }
     });
@@ -2906,14 +3510,28 @@
     chatModelSelect?.addEventListener('mousedown', async function() {
       console.log('🔄 Refreshing model list from Ollama...');
       await loadAvailableModels();
+      await loadTtsVoices();
     });
     
     // Also refresh when dropdown receives focus
     chatModelSelect?.addEventListener('focus', async function() {
       console.log('🔄 Refreshing model list on focus...');
       await loadAvailableModels();
+      await loadTtsVoices();
     });
     
+    // Sync selected model to active session when user changes it
+    chatModelSelect?.addEventListener('change', function() {
+      const session = chatSessions.get(activeChatSessionId);
+      if (session) {
+        session.model = chatModelSelect.value;
+        console.log('🔄 Model changed for session:', session.id, '->', session.model);
+      }
+    });
+    
+    // Sync selected agent engine to active session
+        
+        
     // Image Upload Event Listeners
     uploadImageBtn?.addEventListener('click', () => {
       imageUploadInput?.click();
@@ -3029,12 +3647,19 @@
             
             createdSession.serverSessionId = data.serverSessionId;
             createdSession.sdkSessionId = data.sdkSessionId;
+            createdSession.agentEngine = 'pi-agent';
             createdSession.initializing = false;
             createdSession.initialized = true;
-            
+                        
             // Remove any duplicate sessions with the same serverSessionId
+            // CRITICAL: Don't remove sessions that have active streaming
             chatSessions.forEach((session, id) => {
               if (id !== data.clientSessionId && session.serverSessionId === data.serverSessionId) {
+                // Check if this session has active streaming before deleting
+                if (streamingMessages.has(id)) {
+                  console.log('[chat_session_created] SKIPPING delete of streaming session:', id);
+                  return;
+                }
                 console.log('Removing duplicate session with same serverSessionId:', id, '->', data.clientSessionId);
                 chatSessions.delete(id);
               }
@@ -3059,9 +3684,17 @@
             }
             
             if (activeChatSessionId === data.clientSessionId) {
-              renderChatMessages(createdSession);
-              updateChatStatus('online');
-              enableChatInput(true);
+              // CRITICAL: Skip ALL re-rendering if ANY stream is active
+              if (streamingMessages.size > 0) {
+                console.log('[chat_session_created] SKIPPING all updates - active stream in progress');
+                // Still update status
+                updateChatStatus('online');
+                enableChatInput(true);
+              } else if (!streamingMessages.has(data.clientSessionId)) {
+                renderChatMessages(createdSession);
+                updateChatStatus('online');
+                enableChatInput(true);
+              }
               
               // Show mode indicator
               const modeIndicator = document.getElementById('chatModeIndicator');
@@ -3072,16 +3705,22 @@
               }
               
               // Show welcome message with working directory context
-              if (data.workingDirectory) {
-                setTimeout(() => {
-                  addMessageToActiveSession('assistant', 
-                    `👋 Welcome! I'm ready to help you with this project.
+              // Only show for truly NEW sessions (no history), not reconnections
+              if (data.workingDirectory && (!data.history || data.history.length === 0)) {
+                // Check if we've already shown welcome for this session
+                const welcomeShownKey = `welcome_shown_${data.clientSessionId}`;
+                if (!sessionStorage.getItem(welcomeShownKey)) {
+                  sessionStorage.setItem(welcomeShownKey, 'true');
+                  setTimeout(() => {
+                    addMessageToActiveSession(
+                      `👋 Welcome! I'm ready to help you with this project.
 
 📁 **Working Directory:** \`${data.workingDirectory}\`
 
 You can ask me anything about the code, request modifications, or upload images for analysis.`, 
-                    Date.now() - 1000);
-                }, 100);
+                      'assistant');
+                  }, 100);
+                }
               }
               
               // Send pending message if exists
@@ -3117,15 +3756,23 @@ You can ask me anything about the code, request modifications, or upload images 
 
         case 'chat_message':
           if (data.role === 'assistant') {
+            // Skip empty/undefined assistant messages to avoid blank history bubbles
+            if (!data.content || (typeof data.content === 'string' && data.content.trim().length === 0)) {
+              console.log('[chat_message] Skipping empty assistant message for session', data.sessionId);
+              removeTypingIndicator();
+              break;
+            }
+            
             // Remove typing indicator when response arrives
             removeTypingIndicator();
             
             const targetSession = Array.from(chatSessions.values())
-              .find(s => s.serverSessionId === data.sessionId);
+              .find(s => s.serverSessionId === data.sessionId || s.id === data.sessionId);
             
             console.log('[chat_message] assistant msg for', data.sessionId, 'content:', data.content.substring(0, 40));
             
             if (targetSession) {
+              if (!Array.isArray(targetSession.messages)) targetSession.messages = [];
               // Prevent duplicate history entries if the last message already matches
               const lastMsg = targetSession.messages[targetSession.messages.length - 1];
               const isDuplicate = lastMsg && lastMsg.role === 'assistant' && lastMsg.content === data.content;
@@ -3139,18 +3786,22 @@ You can ask me anything about the code, request modifications, or upload images 
               }
               
               if (targetSession.id === activeChatSessionId) {
+                // Check if stream just completed - if so, the message is already displayed
+                const streamJustCompleted = targetSession._lastStreamCompleteTime && 
+                  (Date.now() - targetSession._lastStreamCompleteTime) < 1000;
+                
+                if (streamJustCompleted) {
+                  console.log('[chat_message] Stream just completed, skipping duplicate render');
+                  break;
+                }
+                
                 // Check if we have an active streaming bubble for this session
                 const streamEl = streamingMessages.get(data.sessionId);
                 if (streamEl) {
                   // Update the streaming message with final formatted content
                   const contentDiv = streamEl.querySelector('.message-content');
                   if (contentDiv) {
-                    let formattedContent = data.content
-                      .replace(/```(\w+)?\n?/g, '<div class="chat-code-block"><code>')
-                      .replace(/```/g, '</code></div>')
-                      .replace(/`([^`]+)`/g, '<code style="background: var(--bg-darker); padding: 2px 6px; border-radius: 3px;">$1</code>')
-                      .replace(/\n/g, '<br>');
-                    contentDiv.innerHTML = formattedContent;
+                    contentDiv.innerHTML = formatMarkdown(data.content);
                   }
                   // Remove streaming class
                   streamEl.classList.remove('streaming');
@@ -3170,12 +3821,7 @@ You can ask me anything about the code, request modifications, or upload images 
                     // Last bubble is recent but content differs (e.g. accumulated deltas vs final)
                     // Update the existing bubble instead of creating a new one
                     if (lastContent) {
-                      let formattedContent = data.content
-                        .replace(/```(\w+)?\n?/g, '<div class="chat-code-block"><code>')
-                        .replace(/```/g, '</code></div>')
-                        .replace(/`([^`]+)`/g, '<code style="background: var(--bg-darker); padding: 2px 6px; border-radius: 3px;">$1</code>')
-                        .replace(/\n/g, '<br>');
-                      lastContent.innerHTML = formattedContent;
+                      lastContent.innerHTML = formatMarkdown(data.content);
                     }
                   } else {
                     // No streaming bubble and not a duplicate history entry → create new bubble
@@ -3185,12 +3831,16 @@ You can ask me anything about the code, request modifications, or upload images 
                 scrollToBottom();
               }
             }
+            // Re-enable input after receiving a complete assistant message
+            updateChatStatus('online');
+            enableChatInput(true);
           }
           break;
 
         case 'chat_error':
           // Remove typing indicator on error
           removeTypingIndicator();
+          decrementAgentWork();
           
           // Clear any pending initialization timeouts
           chatSessions.forEach(session => {
@@ -3200,10 +3850,42 @@ You can ask me anything about the code, request modifications, or upload images 
             }
           });
           
-          appendMessageToContainer(data.message || 'Chat error', 'error');
+          // Check for limit-related errors and show as a friendly bubble
+          const lowerMsg = (data.message || '').toLowerCase();
+          const isLimit = lowerMsg.includes('too many requests') ||
+                        lowerMsg.includes('capacity') ||
+                        lowerMsg.includes('quota') ||
+                        lowerMsg.includes('overloaded');
+
+          if (isLimit) {
+            appendMessageToContainer(data.message, 'system');
+          } else {
+            appendMessageToContainer(data.message || 'Chat error', 'error');
+          }
+
           showChatError(data.message || 'Chat error occurred');
-          updateChatStatus('offline');
-          enableChatInput(false);
+          
+          // Don't permanently disable input for all errors.
+          // Only hard-disable for auth/connection errors. For transient errors
+          // (rate limits, timeouts, provider hiccups), allow retry after a short delay.
+          const lowerErrMsg = (data.message || '').toLowerCase();
+          const isHardError = lowerErrMsg.includes('not authenticated') ||
+                              lowerErrMsg.includes('not connected') ||
+                              lowerErrMsg.includes('not initialized') ||
+                              lowerErrMsg.includes('failed to initialize');
+          
+          if (isHardError) {
+            updateChatStatus('offline');
+            enableChatInput(false);
+          } else {
+            // Transient error — show offline briefly then auto-recover
+            updateChatStatus('offline');
+            enableChatInput(false);
+            setTimeout(() => {
+              updateChatStatus('online');
+              enableChatInput(true);
+            }, 3000);
+          }
           break;
           
         case 'permission_request':
@@ -3269,6 +3951,18 @@ You can ask me anything about the code, request modifications, or upload images 
           
         case 'session_resumed':
           handleSessionResumed(data);
+          break;
+
+        case 'token_usage_update':
+          handleTokenUsageUpdate(data);
+          break;
+
+        case 'subagent_started':
+          incrementAgentWork();
+          break;
+
+        case 'subagent_completed':
+          decrementAgentWork();
           break;
       }
     }
@@ -3556,6 +4250,9 @@ You can ask me anything about the code, request modifications, or upload images 
     function handlePermissionRequest(data) {
       const { requestId, permission, description } = data;
       
+      // Close any existing permission modals to prevent duplicates
+      document.querySelectorAll('.permission-modal').forEach(m => m.remove());
+      
       // Create permission request modal
       const modal = document.createElement('div');
       modal.className = 'permission-modal';
@@ -3566,7 +4263,7 @@ You can ask me anything about the code, request modifications, or upload images 
             <h3>Permission Request</h3>
           </div>
           <div class="permission-modal-body">
-            <p class="permission-description">${description || `The agent is requesting permission to: ${permission}`}</p>
+            <p class="permission-description">${description || `The agent is requesting permission to: ${typeof permission === 'object' ? (permission.kind || JSON.stringify(permission)) : permission}`}</p>
             ${data.details ? `<div class="permission-details"><pre>${JSON.stringify(data.details, null, 2)}</pre></div>` : ''}
           </div>
           <div class="permission-modal-actions">
@@ -3578,6 +4275,43 @@ You can ask me anything about the code, request modifications, or upload images 
       
       document.body.appendChild(modal);
       
+      const closeModal = () => {
+        if (modal && modal.parentNode) {
+          modal.remove();
+        }
+      };
+      
+      // ESC key to close
+      const escHandler = (e) => {
+        if (e.key === 'Escape') {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'permission_response',
+              requestId,
+              approved: false
+            }));
+          }
+          closeModal();
+          document.removeEventListener('keydown', escHandler);
+        }
+      };
+      document.addEventListener('keydown', escHandler);
+      
+      // Click outside content to close
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'permission_response',
+              requestId,
+              approved: false
+            }));
+          }
+          closeModal();
+          document.removeEventListener('keydown', escHandler);
+        }
+      });
+      
       // Handle button clicks
       modal.querySelector('.permission-approve').addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -3587,7 +4321,8 @@ You can ask me anything about the code, request modifications, or upload images 
             approved: true
           }));
         }
-        modal.remove();
+        closeModal();
+        document.removeEventListener('keydown', escHandler);
       });
       
       modal.querySelector('.permission-deny').addEventListener('click', () => {
@@ -3598,7 +4333,8 @@ You can ask me anything about the code, request modifications, or upload images 
             approved: false
           }));
         }
-        modal.remove();
+        closeModal();
+        document.removeEventListener('keydown', escHandler);
       });
     }
     
@@ -3677,13 +4413,18 @@ You can ask me anything about the code, request modifications, or upload images 
       const statusType = success ? 'success' : 'error';
       const icon = success ? '✅' : '❌';
       
-      // Add command result to chat
+      // Remove any pending command indicators
       const container = document.getElementById('chatMessagesContainer');
+      if (container) {
+        container.querySelectorAll('.chat-message.system.pending-command').forEach(el => el.remove());
+      }
+      
+      // Add command result to chat
       if (container) {
         const div = document.createElement('div');
         div.className = `chat-message system ${statusType}`;
         div.innerHTML = `
-          <div class="message-content">
+          <div class="message-content" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
             <span class="command-icon">${icon}</span>
             <span class="command-name">${command}</span>
             <span class="command-message">${message}</span>
@@ -3691,6 +4432,16 @@ You can ask me anything about the code, request modifications, or upload images 
         `;
         container.appendChild(div);
         scrollToBottom();
+      }
+      
+      // Persist result in session history so it survives re-renders
+      const session = chatSessions.get(activeChatSessionId);
+      if (session) {
+        session.messages.push({
+          role: 'system',
+          content: `${icon} ${command}: ${message}`,
+          timestamp: Date.now()
+        });
       }
       
       // Also show notification
@@ -3740,10 +4491,15 @@ You can ask me anything about the code, request modifications, or upload images 
           element.innerHTML = `
             <div class="tool-result">
               <span class="tool-icon">${success ? '✅' : '❌'}</span>
-              <span class="tool-name">${toolData.name}</span>
-              ${result ? `<div class="tool-output">${result}</div>` : ''}
+              <span class="tool-name">${escapeHtml(toolData.name)}</span>
             </div>
           `;
+          if (result) {
+            const outputDiv = document.createElement('div');
+            outputDiv.className = 'tool-output';
+            outputDiv.textContent = stripAnsiCodes(result);
+            element.querySelector('.tool-result').appendChild(outputDiv);
+          }
         }
         activeTools.delete(toolId);
       }
@@ -3789,29 +4545,60 @@ You can ask me anything about the code, request modifications, or upload images 
     function handleStreamDelta(data) {
       const { delta, sessionId } = data;
       
-      // Remove typing indicator when streaming starts
-      removeTypingIndicator();
+      // Do NOT remove typing indicator here — it must stay visible until the stream
+      // is fully complete so the user always knows the agent is still working.
       
       let streamEl = streamingMessages.get(sessionId);
       if (!streamEl) {
-        // Create new streaming message element
+        // First delta for this session — try to reuse the typing indicator bubble
+        // instead of creating a new one, so the user sees a smooth transition.
         const container = document.getElementById('chatMessagesContainer');
         if (container) {
-          const div = document.createElement('div');
-          div.className = 'chat-message assistant streaming';
-          div.innerHTML = '<div class="message-content"></div>';
-          div.dataset.timestamp = Date.now();
-          container.appendChild(div);
-          streamEl = div;
-          streamingMessages.set(sessionId, streamEl);
+          const existingIndicator = document.getElementById('typing-indicator');
+          if (existingIndicator && existingIndicator.parentNode === container) {
+            // Transform typing indicator into streaming bubble
+            existingIndicator.removeAttribute('id'); // CRITICAL: detach from typing-indicator lookups so removeTypingIndicator() won't destroy the stream
+            existingIndicator.classList.remove('typing-indicator');
+            existingIndicator.classList.add('streaming');
+            const textSpan = existingIndicator.querySelector('.typing-text');
+            if (textSpan) textSpan.remove();
+            const bubble = existingIndicator.querySelector('.typing-bubble');
+            if (bubble) bubble.remove();
+            // Ensure content div exists
+            if (!existingIndicator.querySelector('.message-content')) {
+              const contentDiv = document.createElement('div');
+              contentDiv.className = 'message-content';
+              existingIndicator.appendChild(contentDiv);
+            }
+            streamEl = existingIndicator;
+            streamingMessages.set(sessionId, streamEl);
+          } else {
+            // No indicator found — create fresh streaming bubble
+            const div = document.createElement('div');
+            div.className = 'chat-message assistant streaming';
+            div.innerHTML = `
+              <div class="message-avatar-header" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:12px;font-weight:600;opacity:0.8;color:var(--accent-secondary,#a78bfa)">
+                <span>🤖</span><span>AI Assistant</span>
+              </div>
+              <div class="message-content"></div>
+            `;
+            div.dataset.timestamp = Date.now();
+            container.appendChild(div);
+            streamEl = div;
+            streamingMessages.set(sessionId, streamEl);
+          }
         }
       }
       
-      // Append delta
+      // Append delta (element may be detached if user switched tabs)
       const content = streamEl?.querySelector('.message-content');
       if (content) {
-        content.textContent += delta;
-        scrollToBottom();
+        content.dataset.rawText = (content.dataset.rawText || '') + delta;
+        content.innerHTML = formatMarkdown(content.dataset.rawText);
+        // Only scroll if element is actually in the DOM
+        if (streamEl.parentNode) {
+          scrollToBottom();
+        }
       }
       console.log('[stream] delta for', sessionId, ':', delta.substring(0, 20));
     }
@@ -3822,15 +4609,24 @@ You can ask me anything about the code, request modifications, or upload images 
       removeTypingIndicator();
 
       const streamEl = streamingMessages.get(sessionId);
-      if (!streamEl) return;
+      if (!streamEl) {
+        // Already completed (e.g. message_end handled it, agent_end is redundant)
+        // Still ensure input is re-enabled even if stream element was already removed
+        updateChatStatus('online');
+        enableChatInput(true);
+        return;
+      }
+
+      decrementAgentWork();
 
       // Extract final text and add to session history so it survives tab switches
       const contentEl = streamEl.querySelector('.message-content');
-      const finalText = contentEl ? contentEl.textContent : '';
+      const finalText = contentEl ? (contentEl.dataset.rawText || contentEl.textContent || '') : '';
 
       const sessions = Array.from(chatSessions.values());
-      const targetSession = sessions.find(s => s.serverSessionId === sessionId) || sessions.find(s => s.id === activeChatSessionId);
+      const targetSession = sessions.find(s => s.serverSessionId === sessionId || s.id === sessionId);
       if (targetSession && finalText) {
+        if (!Array.isArray(targetSession.messages)) targetSession.messages = [];
         // Only add if the last message isn't already this assistant message
         const lastMsg = targetSession.messages[targetSession.messages.length - 1];
         if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.content !== finalText) {
@@ -3842,10 +4638,47 @@ You can ask me anything about the code, request modifications, or upload images 
         }
       }
 
-      streamEl.classList.remove('streaming');
+      // Remove empty stream elements from DOM to avoid blank bubbles
+      if (!finalText || finalText.trim().length === 0) {
+        if (streamEl.parentNode) {
+          streamEl.parentNode.removeChild(streamEl);
+        }
+      } else {
+        streamEl.classList.remove('streaming');
+        // Add TTS button to the completed assistant message (if not already present)
+        if (!streamEl.querySelector('.tts-btn')) {
+          const ttsBtn = document.createElement('button');
+          ttsBtn.className = 'tts-btn';
+          ttsBtn.innerHTML = '🔊';
+          ttsBtn.title = 'Speak message';
+          ttsBtn.onclick = (e) => {
+            e.stopPropagation();
+            playTts(finalText, ttsBtn);
+          };
+          streamEl.appendChild(ttsBtn);
+        }
+        // Re-attach to DOM if detached and this session is active so user sees the completed message immediately
+        if (!streamEl.parentNode && targetSession && targetSession.id === activeChatSessionId) {
+          const container = document.getElementById('chatMessagesContainer');
+          if (container) {
+            container.appendChild(streamEl);
+            scrollToBottom();
+          }
+        }
+      }
       streamingMessages.delete(sessionId);
+      
+      // Mark this session as recently completed a stream to prevent race condition re-renders
+      if (targetSession) {
+        targetSession._lastStreamCompleteTime = Date.now();
+      }
+      
       console.log('[stream] complete for', sessionId, 'finalText:', finalText.substring(0, 40));
       scrollToBottom();
+      
+      // Re-enable input and set status to online so user can continue the conversation
+      updateChatStatus('online');
+      enableChatInput(true);
     }
     
     function handleReasoning(data) {
@@ -3939,6 +4772,65 @@ You can ask me anything about the code, request modifications, or upload images 
     }
     
     // ===============================
+    // Token Usage Handler
+    // ===============================
+    
+    function handleTokenUsageUpdate(data) {
+      const { sessionId, cumulative } = data;
+      if (!cumulative) return;
+      
+      // Find the session by serverSessionId
+      let session = Array.from(chatSessions.values())
+        .find(s => s.serverSessionId === sessionId);
+      
+      // Fallback: update the active session if serverSessionId is not yet set or no match
+      if (!session && activeChatSessionId) {
+        session = chatSessions.get(activeChatSessionId);
+      }
+      
+      if (session) {
+        // Update cumulative token counts in session
+        session.totalInputTokens = cumulative.inputTokens || 0;
+        session.totalOutputTokens = cumulative.outputTokens || 0;
+        session.totalTokens = cumulative.totalTokens || 0;
+        session.totalCacheReadTokens = cumulative.cacheReadTokens || 0;
+        session.totalCacheWriteTokens = cumulative.cacheWriteTokens || 0;
+        session.totalReasoningTokens = cumulative.reasoningTokens || 0;
+      }
+      
+      // Update UI if this is the active session (match by serverSessionId or fallback)
+      const activeSession = activeChatSessionId ? chatSessions.get(activeChatSessionId) : null;
+      if (activeSession && (!activeSession.serverSessionId || activeSession.serverSessionId === sessionId)) {
+        updateTokenCounterDisplay(cumulative);
+      }
+    }
+    
+    function updateTokenCounterDisplay(cumulative) {
+      const tokenIn = document.getElementById('tokenIn');
+      const tokenOut = document.getElementById('tokenOut');
+      const tokenTotal = document.getElementById('tokenTotal');
+      const tokenCounter = document.getElementById('tokenCounter');
+      
+      if (tokenIn) tokenIn.textContent = formatTokenCount(cumulative?.inputTokens);
+      if (tokenOut) tokenOut.textContent = formatTokenCount(cumulative?.outputTokens);
+      if (tokenTotal) tokenTotal.textContent = formatTokenCount(cumulative?.totalTokens);
+      
+      if (tokenCounter) {
+        tokenCounter.style.display = 'inline-flex';
+        // Highlight animation when tokens update
+        tokenCounter.classList.add('token-updated');
+        setTimeout(() => tokenCounter.classList.remove('token-updated'), 300);
+      }
+    }
+    
+    function formatTokenCount(num) {
+      if (num == null || isNaN(num)) return '0';
+      if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+      if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
+      return num.toString();
+    }
+    
+    // ===============================
     // Session Resume Handler
     // ===============================
     
@@ -3954,7 +4846,7 @@ You can ask me anything about the code, request modifications, or upload images 
           session.serverSessionId = sessionId;
           session.sdkSessionId = sdkSessionId;
           session.initialized = true;
-          
+                    
           if (history && history.length > 0) {
             session.messages = history;
             renderChatMessages(session);
@@ -3979,6 +4871,8 @@ You can ask me anything about the code, request modifications, or upload images 
           command,
           sessionId: activeChatSessionId
         }));
+      } else {
+        showNotification('Cannot send command: not connected', 'error');
       }
     }
     
@@ -3988,6 +4882,7 @@ You can ask me anything about the code, request modifications, or upload images 
           type: 'chat_interrupt'
         }));
       }
+      resetAgentWorkingIndicator();
     }
     
     // ===============================
@@ -3999,6 +4894,17 @@ You can ask me anything about the code, request modifications, or upload images 
       if (input.startsWith('/')) {
         const parts = input.trim().split(/\s+/);
         const command = parts[0].toLowerCase();
+        
+        // Show temporary acknowledgment that command is being processed
+        const container = document.getElementById('chatMessagesContainer');
+        if (container) {
+          const div = document.createElement('div');
+          div.className = 'chat-message system pending-command';
+          div.dataset.pendingCommand = command;
+          div.innerHTML = `<div class="message-content">⏳ Executing ${command}...</div>`;
+          container.appendChild(div);
+          scrollToBottom();
+        }
         
         // Send as command
         sendChatCommand(command);
@@ -4024,6 +4930,12 @@ You can ask me anything about the code, request modifications, or upload images 
       // Call original function
       originalSendChatMessage();
     };
+    
+    // Re-bind send button to use the overridden function
+    if (sendChatBtn) {
+      sendChatBtn.removeEventListener('click', originalSendChatMessage);
+      sendChatBtn.addEventListener('click', sendChatMessage);
+    }
     
     // Make functions globally available
     window.handlePermissionRequest = handlePermissionRequest;
@@ -4091,7 +5003,7 @@ You can ask me anything about the code, request modifications, or upload images 
             chatSessions.set(clientSessionId, {
               id: clientSessionId,
               name: 'Resumed Session',
-              model: data.model || availableModels[0]?.id || 'llama3.2',
+              model: data.model || (availableModels.length > 0 ? availableModels[0].id : 'default'),
               messages: [],
               initialized: false,
               serverSessionId: sessionId,
@@ -4284,6 +5196,8 @@ You can ask me anything about the code, request modifications, or upload images 
         chatInput.value = cmd;
         chatCommandHints.style.display = 'none';
         chatInput.focus();
+        // Auto-send the command
+        sendChatMessage();
       }
     });
 
@@ -4300,6 +5214,8 @@ You can ask me anything about the code, request modifications, or upload images 
         if (moreGroup) {
           moreGroup.classList.remove('show');
         }
+        // Auto-send the command
+        sendChatMessage();
       });
     });
 

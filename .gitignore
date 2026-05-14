@@ -4,110 +4,65 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 package-lock.json
-yarn.lock
 
-# Environment variables
+# Environment & Secrets
 .env
 .env.local
 .env.*.local
 
-# Database files (user data - do not commit)
+# Databases (sensitive user data)
 *.db
 *.db-journal
-*.db-wal
-*.db-shm
-
-# Build artifacts
-dist/
-build/
-*.exe
-*.spec
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+*.sqlite
+*.sqlite3
 
 # Logs
 logs/
 *.log
+server.log
+server.err
 
-# Runtime data
-pids/
-*.pid
-*.seed
-*.pid.lock
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Coverage directory used by tools like istanbul
-coverage/
+# Build outputs
+dist/
+dist-electron/
+build/
 
-# nyc test coverage
-.nyc_output/
-
-# Dependency directories
-jspm_packages/
-
-# Optional npm cache directory
-.npm
-
-# Optional eslint cache
-.eslintcache
-
-# Optional REPL history
-.node_repl_history
-
-# Output of 'npm pack'
-*.tgz
-
-# Yarn Integrity file
-.yarn-integrity
-
-# parcel-bundler cache
-.cache
-.parcel-cache
-
-# next.js build output
-.next
-
-# nuxt.js build output
-.nuxt
-
-# vuepress build output
-.vuepress/dist
-
-# Serverless directories
-.serverless
-
-# FuseBox cache
-.fusebox/
-
-# DynamoDB Local files
-.dynamodb/
-
-# TernJS port file
-.tern-port
-
-# Stores VSCode versions used for testing VSCode extensions
-.vscode-test
-
-# Images directory (user uploads)
+# Session & Cache
+tts/
 images/
+pi-agent-sessions/
+sync.ffs_db
 
-# Temporary files
-*.tmp
-*.temp
+# Test & Backup files
+*.backup
+*.bak
+*.before-fix
+*.after-strip
+*.copilot-backup
+cleanup-copilot.js
+fix-*.js
+fix-*.py
+refactor-*.js
+rewrite-*.mjs
+remove_copilot_blocks.py
+quick-fix.py
+test_*.js
+test_*.py
+test_*.cjs
+
+# Python embed (if bundled separately)
+python-embed/
+
+# Misc
+get-pip.py
+install-req.log
+CLEAN-RELEASE.md
+RELEASE-SUMMARY.md

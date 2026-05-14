@@ -8,12 +8,14 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
+import * as path from 'path';
 import { dirname, join, resolve } from 'path';
 import { config } from 'dotenv';
-import { readdir, stat } from 'fs/promises';
-import { existsSync } from 'fs';
+import { readFile } from 'fs/promises';
+import { readdir, stat, unlink } from 'fs/promises';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
 import * as pty from 'node-pty';
-import { platform } from 'os';
+import * as os from 'os';
 import { execSync } from 'child_process';
 import {
   initDatabase,
@@ -34,10 +36,12 @@ import {
   getChatSessionById,
   getChatSessionBySdkId,
   updateChatSessionSdkId,
+  updateChatSessionPiFile,
   updateChatSessionSummary,
   getChatSessions,
   updateChatSessionActivity,
   updateChatSessionModel,
+  updateChatSessionAgentEngine,
   closeChatSession,
   deleteChatSession,
   addChatMessage,
@@ -53,51 +57,24 @@ import multer from 'multer';
 import { mkdir, access } from 'fs/promises';
 import { join as pathJoin, extname, basename } from 'path';
 
-// GitHub Copilot SDK (optional)
-let CopilotClient, approveAll;
-let copilotSdkImportError = null;
-try {
-  const copilotSdk = await import('@github/copilot-sdk');
-  CopilotClient = copilotSdk.CopilotClient;
-  approveAll = copilotSdk.approveAll;
-  console.log('✅ GitHub Copilot SDK loaded');
-} catch (err) {
-  copilotSdkImportError = err.message;
-  console.log('⚠️  GitHub Copilot SDK not available from @github/copilot-sdk:', err.message);
-  
-  // Fallback: try importing from the actual SDK path inside @github/copilot/copilot-sdk
-  // This handles standalone releases where the proxy package was excluded but the actual code remains
-  try {
-    const { pathToFileURL } = await import('url');
-    const { dirname, join } = await import('path');
-    const { fileURLToPath } = await import('url');
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const fallbackPath = pathToFileURL(join(__dirname, 'node_modules', '@github', 'copilot', 'copilot-sdk', 'index.js')).href;
-    const copilotSdk = await import(fallbackPath);
-    CopilotClient = copilotSdk.CopilotClient;
-    approveAll = copilotSdk.approveAll;
-    console.log('✅ GitHub Copilot SDK loaded from fallback path (@github/copilot/copilot-sdk)');
-    copilotSdkImportError = null;
-  } catch (fallbackErr) {
-    console.log('⚠️  GitHub Copilot SDK fallback import also failed:', fallbackErr.message);
-  }
-}
-
-// Import CLI Adapter (alternative to SDK)
+// PI Agent Adapter
 import {
-  createCliSession,
-  resumeCliSession,
-  sendToCliSession,
-  getCliSession,
-  endCliSession,
-  listCliSessions
-} from './copilot-cli-adapter.js';
+  createPiSession,
+  restorePiSession,
+  getPiSessionFile,
+  sendPiPrompt,
+  abortPiSession,
+  endPiSession,
+  listPiSessions,
+  respondToPiExtensionUI
+} from './pi-agent-adapter.js';
 
-// Configuration: Use CLI or SDK
-const USE_COPILOT_CLI = process.env.USE_COPILOT_CLI === 'true';
-if (USE_COPILOT_CLI) {
-  console.log('🔧 Using Copilot CLI mode (instead of SDK)');
-}
+// Copilot SDK client (legacy, kept as null during pi-agent migration)
+let copilotClient = null;
+let CopilotClient = null;
+async function initCopilotClient() { return false; }
+async function initCopilotChatSession() { return { session: null, sessionId: null, sdkSessionId: null, history: [] }; }
+function getCopilotFallbackModels() { return []; }
 
 // Load environment variables
 config();
@@ -120,6 +97,38 @@ const PORT = process.env.PORT || 3456;
 const HOST = process.env.HOST || 'localhost';
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.cwd();
 const CHAT_ENABLED = process.env.CHAT_ENABLED !== 'false';
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'ollama').toLowerCase();
+if (!['ollama', 'nvidia'].includes(LLM_PROVIDER)) {
+  console.warn(`⚠️  Unsupported LLM provider "${LLM_PROVIDER}" — only "ollama" and "nvidia" are supported. Defaulting to "ollama".`);
+}
+
+/**
+ * Build PI Agent provider configuration based on the configured LLM provider.
+ * PI Agent accepts --provider, --model, --api-key CLI flags plus OPENAI_BASE_URL
+ * and OPENAI_API_KEY env vars for OpenAI-compatible endpoints (NVIDIA NIM, Ollama).
+ * NOTE: We do NOT set PI_OFFLINE=1 — that would suppress the actual LLM inference call.
+ */
+function buildPiProviderConfig() {
+  if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
+    return {
+      provider: 'openai',
+      baseUrl: 'https://integrate.api.nvidia.com/v1',
+      apiKey: process.env.NVIDIA_API_KEY,
+      // NVIDIA NIM free-tier rejects the `tools` field → disable built-in tools
+      noBuiltinTools: true
+    };
+  }
+  if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
+    const ollamaBaseUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
+    const openAiCompatibleUrl = ollamaBaseUrl.endsWith('/v1') ? ollamaBaseUrl : `${ollamaBaseUrl}/v1`;
+    return {
+      provider: 'ollama',  // MUST be 'ollama' for modelRegistry to find Ollama models
+      baseUrl: openAiCompatibleUrl,
+      apiKey: 'ollama'
+    };
+  }
+  return null;
+}
 
 console.log('Configuration:');
 console.log('  PORT:', PORT);
@@ -127,12 +136,130 @@ console.log('  HOST:', HOST);
 console.log('  OLLAMA_HOST:', process.env.OLLAMA_HOST || 'http://localhost:11434 (default)');
 
 // ==========================================
+// TTS (Text-to-Speech) — Edge-TTS
+// ==========================================
+
+import { spawn } from 'child_process';
+import crypto from 'crypto';
+
+const TTS_ENABLED = process.env.TTS_ENABLED !== 'false';
+const TTS_VOICE = process.env.TTS_VOICE || 'af_heart';
+const TTS_MAX_CACHE = 200; // max cached entries
+const TTS_FILE_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+let ttsProcess = null;
+let ttsCallbacks = new Map(); // id -> { resolve, reject }
+let ttsCache = new Map();     // textHash -> audioUrl
+let ttsRequestId = 0;
+let ttsBackendName = '';       // 'edge-tts' | ''
+
+let ttsRetryCount = 0;
+const TTS_MAX_RETRIES = 3;
+let ttsPermanentlyDisabled = false;
+
+function startTtsWorker() {
+  if (!TTS_ENABLED || ttsPermanentlyDisabled) {
+    return;
+  }
+  if (ttsRetryCount >= TTS_MAX_RETRIES) {
+    console.error('❌ Edge-TTS worker failed after 3 retries. TTS permanently disabled.');
+    ttsPermanentlyDisabled = true;
+    return;
+  }
+  try {
+    console.log('🗣️  Starting Edge-TTS worker...');
+    const edgeTtsScript = join(__dirname, 'edge-tts.py');
+    ttsProcess = spawn('python', [edgeTtsScript], {
+      cwd: __dirname,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+
+    ttsProcess.stdout.on('data', (buf) => {
+      try {
+        const lines = buf.toString().split('\n').filter(Boolean);
+        for (const line of lines) {
+          const res = JSON.parse(line);
+          if (res.status === 'ready') {
+            console.log('🗣️  TTS worker ready');
+            ttsRetryCount = 0;
+            if (res.backend) {
+              ttsBackendName = res.backend;
+              console.log('🗣️  TTS backend:', res.backend);
+            }
+            continue;
+          }
+          if (res.voices) {
+            console.log('🗣️  TTS voices list received');
+            continue;
+          }
+          const cb = ttsCallbacks.get(res.id);
+          if (cb) {
+            if (res.audio && !res.audioUrl) {
+              res.audioUrl = res.audio;
+            }
+            if (res.error) {
+              console.error('🗣️  TTS worker error:', res.error);
+            }
+            cb.resolve(res);
+            ttsCallbacks.delete(res.id);
+          } else if (res.error) {
+            console.error('🗣️  TTS worker error (no callback):', res.error);
+          }
+        }
+      } catch (e) {
+        console.error('TTS parse error:', e.message);
+      }
+    });
+
+    ttsProcess.stderr.on('data', (buf) => {
+      console.error('[edge-tts]', buf.toString().trim());
+    });
+
+    ttsProcess.on('close', (code) => {
+      ttsProcess = null;
+      if (code !== 0) {
+        ttsRetryCount++;
+        if (ttsRetryCount < TTS_MAX_RETRIES) {
+          console.warn(`⚠️  Edge-TTS worker exited (${code}), retry ${ttsRetryCount}/${TTS_MAX_RETRIES} in 5s...`);
+          setTimeout(startTtsWorker, 5000);
+        } else {
+          console.error('❌ Edge-TTS permanently disabled after max retries.');
+          ttsPermanentlyDisabled = true;
+        }
+      }
+    });
+
+    ttsProcess.on('error', (err) => {
+      console.error('Failed to spawn Edge-TTS worker:', err.message);
+      ttsProcess = null;
+      ttsRetryCount++;
+      if (ttsRetryCount < TTS_MAX_RETRIES) {
+        setTimeout(startTtsWorker, 5000);
+      } else {
+        console.error('❌ Edge-TTS permanently disabled after spawn failures.');
+        ttsPermanentlyDisabled = true;
+      }
+    });
+  } catch (err) {
+    console.error('TTS worker spawn error:', err.message);
+    ttsRetryCount++;
+    if (ttsRetryCount >= TTS_MAX_RETRIES) {
+      ttsPermanentlyDisabled = true;
+    }
+  }
+}
+
+// Serve generated audio files statically (UUIDs act as opaque unguessable tokens)
+app.use('/tts', express.static(pathJoin(__dirname, 'tts')));
+
+// ==========================================
 // Terminal Detection
 // ==========================================
 
 function detectAvailableTerminals() {
   const terminals = [];
-  const isWindows = platform() === 'win32';
+  const isWindows = os.platform() === 'win32';
   
   if (isWindows) {
     // Check for PowerShell Core (pwsh) first - preferred modern version
@@ -265,12 +392,14 @@ initDatabase();
 // Store active terminals
 const terminals = new Map(); // userId_terminalId -> { pty, cwd, terminalId, userId, ws, lastActivity }
 const clients = new Map(); // ws -> { currentPath, id, userId, authenticated }
-const TERM_GRACE_PERIOD = 5 * 60 * 1000; // 5 minutes grace period for reconnection
 
-// Store active Copilot chat sessions
-const chatSessions = new Map(); // userId -> Map(clientSessionId -> { clientSessionId, serverSessionId, sdkSession, name, model, history, lastActivity })
+// Store active PI Agent chat sessions
+const chatSessions = new Map(); // userId -> Map(clientSessionId -> { clientSessionId, serverSessionId, piSessionId, name, model, history, lastActivity })
+const creationLocks = new Map(); // userId -> Set(clientSessionId) — prevents duplicate session creation
 const CHAT_GRACE_PERIOD = 30 * 60 * 1000; // 30 minutes grace period for chat sessions
-let copilotClient = null;
+
+// Engine is always PI Agent
+const DEFAULT_AGENT_ENGINE = 'pi-agent';
 
 // Middleware
 app.use(express.json());
@@ -278,9 +407,87 @@ app.use(express.static(join(__dirname, 'public')));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), llmProvider: LLM_PROVIDER, ollamaHost: process.env.OLLAMA_HOST || null, nvidiaApiKey: !!process.env.NVIDIA_API_KEY });
 });
 
+// Public chat provider status (for launcher/UI testing)
+app.get('/api/chat/provider-status', async (req, res) => {
+  try {
+    let providerStatus = 'unknown';
+    let modelsCount = 0;
+    let modelList = [];
+    let connectionMessage = '';
+    let copilotAuthenticated = false;
+    let copilotUser = null;
+
+    if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
+      try {
+        const ollamaUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(`${ollamaUrl}/api/tags`, { method: 'GET', signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (response.ok) {
+          const data = await response.json();
+          const models = data.models || [];
+          providerStatus = 'connected';
+          modelsCount = models.length;
+          modelList = models.slice(0, 5).map(m => m.name || m.model);
+          connectionMessage = `Ollama reachable (${models.length} models)`;
+        } else {
+          providerStatus = 'error';
+          connectionMessage = `Ollama returned HTTP ${response.status}`;
+        }
+      } catch (err) {
+        providerStatus = 'unreachable';
+        connectionMessage = `Cannot reach Ollama: ${err.message}`;
+      }
+    } else if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch('https://integrate.api.nvidia.com/v1/models', {
+          headers: { 'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}` },
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (response.ok) {
+          const data = await response.json();
+          const models = data.data || [];
+          providerStatus = 'connected';
+          modelsCount = models.length;
+          modelList = models.slice(0, 5).map(m => m.id || m.name);
+          connectionMessage = `NVIDIA NIM reachable (${models.length} models)`;
+        } else {
+          providerStatus = 'error';
+          connectionMessage = `NVIDIA NIM returned HTTP ${response.status}`;
+        }
+      } catch (err) {
+        providerStatus = 'unreachable';
+        connectionMessage = `Cannot reach NVIDIA NIM: ${err.message}`;
+        // Provide fallback model list so UI isn't empty
+        modelList = getNvidiaFallbackModels().map(m => m.id || m.name);
+      }
+    } else {
+      providerStatus = 'not_configured';
+      connectionMessage = `Provider "${LLM_PROVIDER}" is not configured. Set OLLAMA_HOST for Ollama or NVIDIA_API_KEY for NVIDIA NIM.`;
+    }
+
+    res.json({
+      provider: LLM_PROVIDER,
+      status: providerStatus,
+      modelsCount,
+      models: modelList,
+      message: connectionMessage,
+      ollamaHost: process.env.OLLAMA_HOST || null,
+      copilotAuthenticated: false,
+      copilotUser: null
+    });
+  } catch (err) {
+    console.error('Provider status error:', err);
+    res.status(500).json({ provider: LLM_PROVIDER, status: 'error', message: err.message });
+  }
+});
 // ==========================================
 // Image Upload Configuration
 // ==========================================
@@ -334,6 +541,23 @@ const imageUpload = multer({
   }
 });
 
+// Configure multer for audio uploads (STT)
+const audioStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = pathJoin(__dirname, 'temp_audio');
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `voice_${Date.now()}.wav`);
+  }
+});
+
+const audioUpload = multer({
+  storage: audioStorage,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB max
+});
+
 // Image upload endpoint
 app.post('/api/upload-image', requireAuth, imageUpload.single('image'), async (req, res) => {
   try {
@@ -379,87 +603,16 @@ app.get('/api/images/*', requireAuth, (req, res) => {
 });
 
 // ==========================================
-// Copilot Chat Functions
 // ==========================================
 
-async function initCopilotClient() {
-  if (!CopilotClient) {
-    console.log('⚠️  Copilot SDK not available');
-    return false;
-  }
-  
-  try {
-    const options = {
-      logLevel: process.env.DEBUG === 'true' ? 'debug' : 'info',
-      autoStart: false,
-      useStdio: true // Use stdio transport for more reliable communication
-    };
-    
-    // Use GitHub token if available (for GitHub cloud models)
-    if (process.env.GITHUB_TOKEN) {
-      options.gitHubToken = process.env.GITHUB_TOKEN;
-      options.useLoggedInUser = false;
-    }
-    
-    // For BYOK, provide custom model listing so listModels() returns available models
-    if (process.env.OLLAMA_HOST) {
-      const ollamaModels = await getAvailableOllamaModels();
-      if (ollamaModels.length > 0) {
-        options.onListModels = () => {
-          return ollamaModels.map(m => ({
-            id: m.name || m.model,
-            name: m.name || m.model,
-            provider: 'ollama'
-          }));
-        };
-        console.log(`📋 Registered ${ollamaModels.length} models for SDK`);
-      }
-    }
-    
-    // Log the SDK client options (without sensitive data)
-    console.log('🔧 CopilotClient options:', {
-      logLevel: options.logLevel,
-      autoStart: options.autoStart,
-      useStdio: options.useStdio,
-      hasGitHubToken: !!options.gitHubToken,
-      hasOnListModels: !!options.onListModels
-    });
-    
-    copilotClient = new CopilotClient(options);
-    
-    // Set up event listeners for client lifecycle events
-    copilotClient.on('session.created', (event) => {
-      console.log('📎 SDK event: session.created', event.sessionId);
-    });
-    
-    copilotClient.on('session.deleted', (event) => {
-      console.log('📎 SDK event: session.deleted', event.sessionId);
-    });
-    
-    await copilotClient.start();
-    console.log('✅ Copilot client initialized');
-    console.log('📡 SDK Client state:', copilotClient.getState());
-    
-    // Log BYOK configuration status
-    if (process.env.OLLAMA_HOST) {
-      console.log(`✅ BYOK Provider available: ${process.env.OLLAMA_HOST}`);
-      
-      // Test SDK connection to Ollama by listing models
-      try {
-        const sdkModels = await copilotClient.listModels();
-        console.log(`✅ SDK can list ${sdkModels?.length || 0} models from provider`);
-      } catch (modelErr) {
-        console.warn('⚠️  SDK could not list models:', modelErr.message);
-      }
-    }
-    
-    return true;
-  } catch (err) {
-    console.error('❌ Failed to initialize Copilot client:', err.message);
-    copilotClient = null;
-    return false;
-  }
-}
+/**
+ * Attempt to retrieve the GitHub token from the local gh CLI.
+ * This bridges the host machine's Copilot CLI auth to the SDK client.
+ * @returns {{token: string|null, authenticated: boolean, user: string|null, method: string|null}}
+ */
+
+
+
 
 // Function to check available Ollama models
 async function getAvailableOllamaModels() {
@@ -483,457 +636,255 @@ async function validateOllamaModel(model) {
   return modelIds.includes(model);
 }
 
-// Store for pending permission requests and user input requests
+// NVIDIA NIM model helpers
+// NOTE: Updated from NVIDIA API reference and community testing (2026-05).
+// Confirmed working free-tier NVIDIA models (tested live)
+const NVIDIA_FALLBACK_MODELS = [
+  { id: 'meta/llama-3.1-8b-instruct', name: 'Llama 3.1 8B (Fast)' },
+  { id: 'stepfun-ai/step-3.5-flash', name: 'StepFun 3.5 Flash (Reasoning)' },
+];
+
+const NVIDIA_MODEL_DISPLAY_NAMES = {
+  'meta/llama-3.1-8b-instruct': 'Llama 3.1 8B (Fast)',
+  'stepfun-ai/step-3.5-flash': 'StepFun 3.5 Flash (Reasoning)',
+};
+
+function getNvidiaModelDisplayName(modelId) {
+  return NVIDIA_MODEL_DISPLAY_NAMES[modelId] || modelId;
+}
+
+function getNvidiaFallbackModels() {
+  return NVIDIA_FALLBACK_MODELS;
+}
+
+
+// Cache for NVIDIA available models (refreshed every 30 min)
+let _nvidiaModelsCache = null;
+let _nvidiaModelsCacheTime = 0;
+const NVIDIA_MODELS_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+// Set of verified-working free-tier NVIDIA model IDs — kept in sync with NVIDIA_FALLBACK_MODELS
+const NVIDIA_VERIFIED_MODEL_IDS = new Set(getNvidiaFallbackModels().map(m => m.id));
+
+async function getAvailableNvidiaModels() {
+  if (_nvidiaModelsCache && (Date.now() - _nvidiaModelsCacheTime) < NVIDIA_MODELS_CACHE_TTL) {
+    return _nvidiaModelsCache;
+  }
+  try {
+    const apiKey = process.env.NVIDIA_API_KEY;
+    if (!apiKey) return getNvidiaFallbackModels();
+    const response = await fetch('https://integrate.api.nvidia.com/v1/models', {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    });
+    if (response.ok) {
+      const data = await response.json();
+      const allModels = data.data || [];
+      // Only expose models from our verified fallback list that also appear in the API.
+      // This avoids showing models that return 404/410 when actually used.
+      const verifiedIds = new Set(getNvidiaFallbackModels().map(m => m.id));
+      _nvidiaModelsCache = allModels.filter(m => verifiedIds.has(m.id));
+      _nvidiaModelsCacheTime = Date.now();
+      console.log(`📋 NVIDIA API returned ${allModels.length} models, filtered to ${_nvidiaModelsCache.length} verified`);
+      return _nvidiaModelsCache;
+    }
+  } catch (err) {
+    console.error('Failed to fetch NVIDIA NIM models:', err.message);
+  }
+  // On error or empty API, return the static fallback list
+  return getNvidiaFallbackModels();
+}
+
+async function validateNvidiaModel(model) {
+  const availableModels = await getAvailableNvidiaModels();
+  if (availableModels.length === 0) {
+    // If we can't reach NVIDIA API, fallback to static list
+    return getNvidiaFallbackModels().some(m => m.id === model || m.name === model);
+  }
+  const modelIds = availableModels.map(m => m.id || m.name);
+  return modelIds.includes(model);
+}
+
+// Validate a model name for the currently configured LLM provider
+// Returns true if the model is valid, false otherwise
+async function validateModelForProvider(model) {
+  if (!model) return false;
+  if (LLM_PROVIDER === 'nvidia') {
+    return await validateNvidiaModel(model);
+  }
+  if (LLM_PROVIDER === 'ollama') {
+    // For Ollama, just check the model name looks reasonable (non-empty, no obvious invalid chars)
+    return model && model.length > 0 && !model.includes('//');
+  }
+  // For Copilot, accept any model name
+  return true;
+}
+
+/**
+ * Wire PI Agent event handlers (onMessage / onError) to WebSocket messages.
+ * Extracted shared helper to avoid duplication between create and reconnect paths.
+ */
+function wirePiSessionEvents(piSession, ws, clientSessionId, clientData, serverSessionId) {
+  piSession.onMessage = (eventType, payload) => {
+    if (ws.readyState !== 1) {
+      console.log(`[PI] WebSocket not open (state=${ws.readyState}), dropping event ${eventType}`);
+      return;
+    }
+    const resetSending = () => {
+      const userSess = chatSessions.get(clientData.userId);
+      if (userSess instanceof Map) {
+        const sd = userSess.get(clientSessionId);
+        if (sd) {
+          sd._sending = false;
+          if (sd._sendingTimeout) { clearTimeout(sd._sendingTimeout); sd._sendingTimeout = null; }
+        }
+      }
+    };
+    if (eventType === 'agent_event') {
+      const event = payload;
+      console.log(`[PI] agent_event type=${event.type} session=${clientSessionId}`);
+      switch (event.type) {
+        case 'message_start': {
+          console.log(`[PI] message_start session=${clientSessionId}`);
+          // Signal start of streaming (frontend can show typing indicator)
+          ws.send(JSON.stringify({ type: 'chat_stream_start', sessionId: clientSessionId }));
+          break;
+        }
+        case 'text_delta': {
+          // Incremental streaming text from PI Agent
+          const delta = event.delta || payload?.delta || '';
+          if (delta) {
+            console.log(`[PI] text_delta text=${JSON.stringify(delta.slice(0,60))}`);
+            ws.send(JSON.stringify({ type: 'chat_stream_delta', sessionId: clientSessionId, delta }));
+          }
+          break;
+        }
+        case 'thinking_delta': {
+          // Optional: Handle reasoning/thinking text if wanted
+          const delta = event.delta || payload?.delta || '';
+          if (delta) {
+            console.log(`[PI] thinking_delta text=${JSON.stringify(delta.slice(0,60))}`);
+            // Could send as a separate type, but for now append to stream
+            ws.send(JSON.stringify({ type: 'chat_stream_delta', sessionId: clientSessionId, delta }));
+          }
+          break;
+        }
+        case 'message_update': {
+          // Legacy/message content updates (for backwards compatibility)
+          const msg = event.message;
+          let text = '';
+          if (Array.isArray(msg?.content)) text = msg.content.map(c => c.type === 'text' ? c.text : '').join('');
+          else if (typeof msg?.content === 'string') text = msg.content;
+          console.log(`[PI] message_update text=${JSON.stringify(text?.slice(0,60))}`);
+          if (text) ws.send(JSON.stringify({ type: 'chat_stream_delta', sessionId: clientSessionId, delta: text }));
+          break;
+        }
+        case 'message_end': {
+          const msg = event.message;
+          let text = '';
+          if (Array.isArray(msg?.content)) text = msg.content.map(c => c.type === 'text' ? c.text : '').join('');
+          else if (typeof msg?.content === 'string') text = msg.content;
+          console.log(`[PI] message_end text=${JSON.stringify(text?.slice(0,60))}`);
+          ws.send(JSON.stringify({ type: 'chat_stream_complete', sessionId: clientSessionId }));
+          ws.send(JSON.stringify({ type: 'chat_message', sessionId: clientSessionId, role: 'assistant', content: text }));
+          if (text) addChatMessage(serverSessionId, 'assistant', text);
+          resetSending();
+          break;
+        }
+        case 'tool_execution_start': {
+          ws.send(JSON.stringify({ type: 'tool_start', sessionId: clientSessionId, toolId: event.toolCallId, name: event.toolName, description: `Executing ${event.toolName}...`, arguments: event.args }));
+          break;
+        }
+        case 'tool_execution_end': {
+          ws.send(JSON.stringify({ type: 'tool_complete', sessionId: clientSessionId, toolId: event.toolCallId, result: JSON.stringify(event.result), success: !event.isError }));
+          break;
+        }
+        case 'extension_error': {
+          const errorMsg = event.error || 'Unknown error from PI Agent';
+          console.error(`[PI] extension_error session=${clientSessionId}:`, errorMsg);
+          ws.send(JSON.stringify({ type: 'chat_error', sessionId: clientSessionId, message: errorMsg }));
+          resetSending();
+          break;
+        }
+      }
+    } else if (eventType === 'extension_ui_request') {
+      ws.send(JSON.stringify({
+        type: 'permission_request',
+        requestId: payload.id,
+        title: payload.title || 'PI Agent Request',
+        message: payload.message || JSON.stringify(payload),
+        actions: payload.method === 'confirm' ? ['approve', 'reject'] : ['respond']
+      }));
+      pendingPermissions.set(payload.id, {
+        resolve: (result) => {
+          try {
+            respondToPiExtensionUI(clientSessionId, payload.id, { approved: result.kind === 'approve-once' });
+          } catch (e) { console.error(e.message); }
+        },
+        userId: clientData.userId
+      });
+    }
+  };
+  piSession.onError = (errMsg) => {
+    console.log(`[PI] onError session=${clientSessionId}:`, errMsg);
+    ws.send(JSON.stringify({ type: 'chat_error', sessionId: clientSessionId, message: errMsg }));
+    const resetSending = () => {
+      const userSess = chatSessions.get(clientData.userId);
+      if (userSess instanceof Map) {
+        const sd = userSess.get(clientSessionId);
+        if (sd) {
+          sd._sending = false;
+          if (sd._sendingTimeout) { clearTimeout(sd._sendingTimeout); sd._sendingTimeout = null; }
+        }
+      }
+    };
+    resetSending();
+  };
+}
+
+/**
+ * Ensure a working directory exists; create it recursively if needed.
+ * Prevents "Parent directory does not exist" tool errors.
+ */
+function ensureWorkingDirectory(dir) {
+  const target = dir || WORKSPACE_DIR;
+  if (!existsSync(target)) {
+    try { mkdirSync(target, { recursive: true }); } catch (e) { console.warn('⚠️ Could not create working dir:', target, e.message); }
+  }
+  return target;
+}
 const pendingPermissions = new Map(); // requestId -> { resolve, reject, ws }
 const pendingUserInputs = new Map(); // requestId -> { resolve, reject, ws }
 
 // Permission handler that asks the user for approval
-function createPermissionHandler(userId) {
-  return async (request, invocation) => {
-    const requestId = `perm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    return new Promise((resolve, reject) => {
-      // Store the promise callbacks
-      pendingPermissions.set(requestId, { resolve, reject, userId });
-      
-      // Find all WebSocket connections for this user and send permission request
-      for (const [ws, clientData] of clients) {
-        if (clientData.userId === userId && ws.readyState === 1) {
-          ws.send(JSON.stringify({
-            type: 'permission_request',
-            requestId,
-            permission: {
-              kind: request.kind,
-              message: request.message || `Permission required: ${request.kind}`,
-              details: request.details || {},
-              tool: request.tool || null,
-              path: request.path || null,
-              command: request.command || null
-            },
-            timeout: 60000 // 60 second timeout
-          }));
-        }
-      }
-      
-      // Set timeout for permission request
-      setTimeout(() => {
-        if (pendingPermissions.has(requestId)) {
-          pendingPermissions.delete(requestId);
-          reject(new Error('Permission request timeout'));
-        }
-      }, 60000);
-    });
-  };
-}
 
 // User input handler for ask_user tool
-function createUserInputHandler(userId) {
-  return async (request) => {
-    const requestId = `input_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    return new Promise((resolve, reject) => {
-      pendingUserInputs.set(requestId, { resolve, reject, userId });
-      
-      for (const [ws, clientData] of clients) {
-        if (clientData.userId === userId && ws.readyState === 1) {
-          ws.send(JSON.stringify({
-            type: 'user_input_request',
-            requestId,
-            prompt: request.prompt || 'Please provide input',
-            placeholder: request.placeholder || '',
-            defaultValue: request.defaultValue || ''
-          }));
-        }
-      }
-      
-      setTimeout(() => {
-        if (pendingUserInputs.has(requestId)) {
-          pendingUserInputs.delete(requestId);
-          reject(new Error('User input request timeout'));
-        }
-      }, 300000); // 5 minute timeout
-    });
-  };
+
+
+// Helper to look up chat session data by server session ID
+function getChatSessionData(userId, sessionId) {
+  const userSessions = chatSessions.get(userId);
+  if (!userSessions) return null;
+  let data = userSessions.get(sessionId);
+  if (data) return data;
+  for (const [, entry] of userSessions) {
+    if (entry.sessionId === sessionId) {
+      return entry;
+    }
+  }
+  return null;
 }
 
-async function initCopilotChatSession(userId, model = null, sdkSessionId = null) {
-  if (!copilotClient) {
-    throw new Error('Copilot client not initialized');
+// Rough token estimator (4 chars ~ 1 token for English; 2 chars ~ 1 token for CJK)
+function estimateTokens(text) {
+  if (!text || typeof text !== 'string') return 0;
+  let chars = 0;
+  for (const ch of text) {
+    chars += (ch.charCodeAt(0) > 127) ? 2 : 1;
   }
-  
-  const sessionConfig = {
-    onPermissionRequest: createPermissionHandler(userId),
-    onUserInputRequest: createUserInputHandler(userId),
-    workingDirectory: WORKSPACE_DIR,
-    enableConfigDiscovery: true,
-  };
-  
-  // Use the provided model or fallback to default
-  const useModel = model || 'llama3.2';
-  sessionConfig.model = useModel;
-  
-  // Configure BYOK provider if OLLAMA_HOST is set
-  const provider = process.env.OLLAMA_HOST ? 'byok' : null;
-  
-  if (process.env.OLLAMA_HOST) {
-    const ollamaBaseUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
-    const openAiCompatibleUrl = ollamaBaseUrl.endsWith('/v1') ? ollamaBaseUrl : `${ollamaBaseUrl}/v1`;
-    sessionConfig.provider = {
-      type: 'openai',
-      baseUrl: openAiCompatibleUrl,
-      apiKey: 'ollama' // Ollama requires any non-empty API key
-    };
-    console.log(`🔧 BYOK Provider configured: ${openAiCompatibleUrl}`);
-  }
-  
-  if (!process.env.OLLAMA_HOST) {
-    console.warn('⚠️ OLLAMA_HOST not configured. Chat may not work.');
-  }
-  
-  let sessionId;
-  let history = [];
-  let sdkSession;
-  let actualSdkSessionId;
-  
-  // Try to resume existing SDK session if we have an SDK session ID
-  if (sdkSessionId) {
-    console.log(`📂 Attempting to resume SDK session ${sdkSessionId} for user ${userId}`);
-    
-    try {
-      // First check if we have an existing DB session with this SDK ID to get the model
-      const existingDbSession = getChatSessionBySdkId(userId, sdkSessionId);
-      if (existingDbSession) {
-        // Use the model from the existing session
-        const sessionModel = existingDbSession.model || 'llama3.2';
-        sessionConfig.model = sessionModel;
-        console.log(`🔧 Using model from existing session: ${sessionModel}`);
-      }
-      
-      sdkSession = await copilotClient.resumeSession(sdkSessionId, sessionConfig);
-      actualSdkSessionId = sdkSession.id || sdkSession.sessionId;
-      console.log(`✅ Successfully resumed SDK session: ${actualSdkSessionId}`);
-      
-      // Get messages from SDK session
-      try {
-        const sdkMessages = await sdkSession.getMessages();
-        history = sdkMessages.map(msg => ({
-          role: msg.data?.role || (msg.type === 'user.message' ? 'user' : 'assistant'),
-          content: msg.data?.content || '',
-          timestamp: Date.now()
-        }));
-        console.log(`📜 Loaded ${history.length} messages from SDK session`);
-      } catch (msgErr) {
-        console.log(`⚠️ Could not load SDK session messages: ${msgErr.message}`);
-      }
-      
-      // Use the existing DB session ID
-      if (existingDbSession) {
-        sessionId = existingDbSession.id;
-        console.log(`✅ Found existing DB session: ${sessionId}`);
-      } else {
-        // Create new DB session linked to SDK session
-        const result = createChatSession(userId, 'Chat Session', sessionConfig.model, provider, actualSdkSessionId);
-        if (result.success) {
-          sessionId = result.sessionId;
-          console.log(`🆕 Created new DB session ${sessionId} for resumed SDK session`);
-        }
-      }
-    } catch (err) {
-      console.log(`⚠️ Failed to resume SDK session: ${err.message}`);
-      console.log(`   Creating new SDK session instead...`);
-      sdkSessionId = null; // Reset so we create new session below
-    }
-  }
-  
-  // If not resuming or resume failed, create new session
-  if (!sdkSessionId) {
-    // Check for existing active session in database
-    const dbSession = getActiveChatSession(userId);
-    
-    if (dbSession && dbSession.sdk_session_id) {
-      // Use the model from the existing DB session
-      const sessionModel = dbSession.model || 'llama3.2';
-      sessionConfig.model = sessionModel;
-      console.log(`🔧 Using model from active session: ${sessionModel}`);
-      
-      // Try to resume the existing SDK session
-      console.log(`📂 Found existing session with SDK ID: ${dbSession.sdk_session_id}`);
-      try {
-        sdkSession = await copilotClient.resumeSession(dbSession.sdk_session_id, sessionConfig);
-        actualSdkSessionId = sdkSession.id || sdkSession.sessionId;
-        sessionId = dbSession.id;
-        console.log(`✅ Resumed existing SDK session: ${actualSdkSessionId}`);
-        
-        // Load messages from SDK session
-        try {
-          const sdkMessages = await sdkSession.getMessages();
-          history = sdkMessages.map(msg => ({
-            role: msg.data?.role || (msg.type === 'user.message' ? 'user' : 'assistant'),
-            content: msg.data?.content || '',
-            timestamp: Date.now()
-          }));
-        } catch (e) {
-          // Fall back to DB messages
-          history = getRecentChatMessages(sessionId, 50);
-        }
-      } catch (err) {
-        console.log(`⚠️ Could not resume SDK session: ${err.message}`);
-        // Create new SDK session
-        sdkSession = await copilotClient.createSession(sessionConfig);
-        actualSdkSessionId = sdkSession.id || sdkSession.sessionId;
-        sessionId = dbSession.id;
-        
-        // Update DB session with new SDK ID
-        updateChatSessionSdkId(sessionId, actualSdkSessionId);
-        
-        // Load DB messages for history
-        history = getRecentChatMessages(sessionId, 50);
-      }
-    } else if (dbSession) {
-      // Existing DB session but no SDK session, create new SDK session
-      sessionId = dbSession.id;
-      console.log(`📂 Creating new SDK session for existing DB session ${sessionId}`);
-      
-      // Use the model from the existing DB session
-      const sessionModel = dbSession.model || 'llama3.2';
-      sessionConfig.model = sessionModel;
-      console.log(`🔧 Using model from existing session: ${sessionModel}`);
-      
-      sdkSession = await copilotClient.createSession(sessionConfig);
-      actualSdkSessionId = sdkSession.id || sdkSession.sessionId;
-      
-      // Update DB session with SDK ID
-      updateChatSessionSdkId(sessionId, actualSdkSessionId);
-      
-      history = getRecentChatMessages(sessionId, 50);
-    }else {
-      // Create completely new session
-      console.log(`🆕 Creating new SDK and DB session for user ${userId}`);
-      
-      sdkSession = await copilotClient.createSession(sessionConfig);
-      actualSdkSessionId = sdkSession.id || sdkSession.sessionId;
-      
-      const result = createChatSession(userId, 'Chat Session', useModel, provider, actualSdkSessionId);
-      if (!result.success) {
-        throw new Error('Failed to create chat session in database');
-      }
-      sessionId = result.sessionId;
-    }
-  }
-  
-  console.log(`🔧 Session ready - DB: ${sessionId}, SDK: ${actualSdkSessionId}`);
-  
-  // Set up comprehensive event handlers
-  setupSessionEventHandlers(sdkSession, userId, sessionId);
-  
-  // Use Map pattern for multi-session support
-  let userSessions = chatSessions.get(userId);
-  if (!(userSessions instanceof Map)) {
-    userSessions = new Map();
-    chatSessions.set(userId, userSessions);
-  }
-  
-  const chatSessionData = {
-    session: sdkSession,
-    sdkSessionId: actualSdkSessionId,
-    sessionId,
-    history,
-    lastActivity: Date.now(),
-    currentMode: 'interactive',
-    pendingToolCalls: new Map()
-  };
-  
-  userSessions.set(sessionId, chatSessionData);
-  
-  return { session: sdkSession, sdkSessionId: actualSdkSessionId, sessionId, history };
+  return Math.ceil(chars / 4);
 }
 
 // Set up all event handlers for the session
-function setupSessionEventHandlers(session, userId, sessionId) {
-  // Prevent duplicate handler registration
-  if (session._eventHandlersSetup) {
-    return;
-  }
-  session._eventHandlersSetup = true;
-
-  // Assistant message
-  session.on('assistant.message', (event) => {
-    const userSessions = chatSessions.get(userId);
-    const chatData = userSessions?.get(sessionId);
-    if (chatData) {
-      const message = {
-        role: 'assistant',
-        content: event.data.content,
-        timestamp: Date.now()
-      };
-      
-      chatData.history.push(message);
-      addChatMessage(chatData.sessionId, 'assistant', event.data.content);
-      
-      broadcastToUser(userId, {
-        type: 'chat_message',
-        sessionId: sessionId,
-        role: 'assistant',
-        content: event.data.content
-      });
-    }
-  });
-  
-  // Streaming message delta (for real-time streaming)
-  session.on('assistant.message_delta', (event) => {
-    broadcastToUser(userId, {
-      type: 'chat_stream_delta',
-      delta: event.data.delta || event.data.content || '',
-      sessionId: sessionId
-    });
-  });
-  
-  // Reasoning events (for extended thinking)
-  session.on('assistant.reasoning', (event) => {
-    broadcastToUser(userId, {
-      type: 'chat_reasoning',
-      sessionId: sessionId,
-      content: event.data.content || event.data.reasoning || ''
-    });
-  });
-  
-  session.on('assistant.reasoning_delta', (event) => {
-    broadcastToUser(userId, {
-      type: 'chat_reasoning_delta',
-      sessionId: sessionId,
-      content: event.data.delta || ''
-    });
-  });
-  
-  // Tool execution events
-  session.on('tool.execution_start', (event) => {
-    const userSessions = chatSessions.get(userId);
-    const chatData = userSessions?.get(sessionId);
-    if (chatData) {
-      const toolCallId = event.data.id || `tool_${Date.now()}`;
-      chatData.pendingToolCalls.set(toolCallId, {
-        name: event.data.name,
-        arguments: event.data.arguments || {},
-        status: 'running'
-      });
-      
-      broadcastToUser(userId, {
-        type: 'tool_start',
-        sessionId: sessionId,
-        toolId: toolCallId,
-        name: event.data.name,
-        description: event.data.description || `Running ${event.data.name}...`,
-        arguments: event.data.arguments
-      });
-    }
-  });
-  
-  session.on('tool.execution_progress', (event) => {
-    broadcastToUser(userId, {
-      type: 'tool_progress',
-      sessionId: sessionId,
-      toolId: event.data.id,
-      progress: event.data.progress || ''
-    });
-  });
-  
-  session.on('tool.execution_complete', (event) => {
-    const userSessions = chatSessions.get(userId);
-    const chatData = userSessions?.get(sessionId);
-    if (chatData) {
-      chatData.pendingToolCalls.delete(event.data.id);
-    }
-    
-    broadcastToUser(userId, {
-      type: 'tool_complete',
-      sessionId: sessionId,
-      toolId: event.data.id,
-      result: event.data.result || '',
-      success: !event.data.error
-    });
-  });
-  
-  // Permission events
-  session.on('permission.requested', (event) => {
-    console.log(`Permission requested: ${event.data.kind}`);
-  });
-  
-  session.on('permission.completed', (event) => {
-    broadcastToUser(userId, {
-      type: 'permission_completed',
-      sessionId: sessionId,
-      requestId: event.data.requestId,
-      result: event.data.result
-    });
-  });
-  
-  // Mode changes (interactive, plan, autopilot)
-  session.on('mode.changed', (event) => {
-    const userSessions = chatSessions.get(userId);
-    const chatData = userSessions?.get(sessionId);
-    if (chatData) {
-      chatData.currentMode = event.data.mode || 'interactive';
-    }
-    
-    broadcastToUser(userId, {
-      type: 'mode_changed',
-      sessionId: sessionId,
-      mode: event.data.mode || 'interactive'
-    });
-  });
-  
-  // Plan mode events
-  session.on('plan.changed', (event) => {
-    broadcastToUser(userId, {
-      type: 'plan_update',
-      sessionId: sessionId,
-      operation: event.data.operation, // 'create', 'update', 'delete'
-      content: event.data.content || ''
-    });
-  });
-  
-  // Session idle / stream complete
-  session.on('session.idle', () => {
-    console.log(`Chat session idle for user ${userId}`);
-    broadcastToUser(userId, { type: 'chat_stream_complete', sessionId: sessionId });
-  });
-  
-  // Error events
-  session.on('error', (event) => {
-    console.error(`Session error for user ${userId}:`, event.data);
-    broadcastToUser(userId, {
-      type: 'chat_error',
-      sessionId: sessionId,
-      message: event.data.message || 'An error occurred',
-      code: event.data.code
-    });
-  });
-  
-  // Abort events
-  session.on('abort', (event) => {
-    broadcastToUser(userId, {
-      type: 'chat_aborted',
-      reason: event.data.reason || 'Operation aborted'
-    });
-  });
-  
-  // Sub-agent events
-  session.on('subagent.started', (event) => {
-    broadcastToUser(userId, {
-      type: 'subagent_started',
-      agentId: event.data.agentId,
-      agentName: event.data.name || 'Agent'
-    });
-  });
-  
-  session.on('subagent.completed', (event) => {
-    broadcastToUser(userId, {
-      type: 'subagent_completed',
-      agentId: event.data.agentId,
-      success: event.data.success
-    });
-  });
-}
 
 // Helper to broadcast to all connections for a user
 function broadcastToUser(userId, message) {
@@ -944,8 +895,75 @@ function broadcastToUser(userId, message) {
   }
 }
 
-// Initialize Copilot on startup
-initCopilotClient().catch(console.error);
+function formatToolResult(result, error) {
+  if (error) {
+    if (typeof error === 'string') return error;
+    if (error.message) return error.message;
+    try {
+      return JSON.stringify(error, null, 2);
+    } catch {
+      return String(error);
+    }
+  }
+  if (result == null) return '';
+  if (typeof result === 'string') return unescapeTerminalString(result);
+
+  // SDK tool result object shape: { content, contents: [...], detailedContent }
+  if (typeof result === 'object') {
+    const parts = [];
+
+    if (result.contents && Array.isArray(result.contents)) {
+      for (const item of result.contents) {
+        if (item.type === 'text' && item.text) {
+          parts.push(item.text);
+        } else if (item.type === 'terminal' && item.text) {
+          parts.push(item.text);
+        } else if (item.type === 'image' && item.data) {
+          parts.push(`[Image: ${item.mimeType || 'image'}]`);
+        } else if (item.type === 'resource_link' && item.name) {
+          parts.push(`[Resource: ${item.name}]`);
+        } else if (item.type === 'resource' && item.resource) {
+          const r = item.resource;
+          parts.push(r.text || `[Resource: ${r.uri}]`);
+        }
+      }
+    }
+
+    if (parts.length === 0 && result.detailedContent) {
+      parts.push(result.detailedContent);
+    }
+    if (parts.length === 0 && result.content) {
+      parts.push(result.content);
+    }
+
+    if (parts.length > 0) {
+      return parts.map(unescapeTerminalString).join('\n\n');
+    }
+
+    try {
+      return JSON.stringify(result, null, 2);
+    } catch {
+      return String(result);
+    }
+  }
+
+  return String(result);
+}
+
+function unescapeTerminalString(str) {
+  if (typeof str !== 'string') return str;
+  // Some SDK tool results encode newlines/tabs as literal \n / \t
+  if (str.includes('\\n') || str.includes('\\t') || str.includes('\\\\')) {
+    return str
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\\\/g, '\\');
+  }
+  return str;
+}
+
+// Initialize Copilot on startup - disabled to allow launcher-controlled auth
+// initCopilotClient().catch(console.error);
 
 // ==========================================
 // Authentication Middleware
@@ -985,7 +1003,7 @@ app.get('/api/terminals/available', requireAuth, (req, res) => {
     res.json({
       success: true,
       terminals: terminals,
-      default: terminals.find(t => t.recommended)?.id || (platform() === 'win32' ? 'powershell' : 'bash')
+      default: terminals.find(t => t.recommended)?.id || (os.platform() === 'win32' ? 'powershell' : 'bash')
     });
   } catch (err) {
     console.error('Error detecting terminals:', err);
@@ -1174,32 +1192,75 @@ app.delete('/api/commands/:id', requireAuth, (req, res) => {
 
 // Get chat status
 app.get('/api/chat/status', requireAuth, async (req, res) => {
-  const hasCopilot = !!copilotClient;
+  const hasCopilot = false;
+  let piAgentAvailable = false;
+  try {
+    const cmd = process.platform === 'win32' ? 'where pi' : 'which pi';
+    execSync(cmd, { stdio: 'ignore' });
+    piAgentAvailable = true;
+  } catch (e) {
+    piAgentAvailable = false;
+  }
   const userSessions = chatSessions.get(req.user.id);
   const hasSession = userSessions instanceof Map && userSessions.size > 0;
   // Get first session for history count, or null if no sessions
   const firstSession = hasSession ? userSessions.values().next().value : null;
   
-  // Get actual available models from Ollama
+  // Get actual available models and auth status based on provider
   let modelsList = [];
   let defaultModel = null;
+  let copilotAuthenticated = false;
+  let copilotUser = null;
   
-  if (process.env.OLLAMA_HOST) {
+  if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
     try {
       const ollamaModels = await getAvailableOllamaModels();
       modelsList = ollamaModels.map(m => m.name || m.model);
-      // Use first available model as default
-      if (modelsList.length > 0) {
-        defaultModel = modelsList[0];
-      }
+      if (modelsList.length > 0) defaultModel = modelsList[0];
+      // Ollama doesn't have GitHub auth - it's local
+      copilotAuthenticated = true;
     } catch (err) {
       console.error('Failed to get Ollama models for status:', err.message);
     }
+  } else if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
+    try {
+      let nvidiaModels = await getAvailableNvidiaModels();
+      if (nvidiaModels.length === 0) {
+        nvidiaModels = getNvidiaFallbackModels();
+        console.log('📋 Using NVIDIA fallback model list for status');
+      }
+      modelsList = nvidiaModels.map(m => {
+        const id = m.id || m.name;
+        return { id, name: getNvidiaModelDisplayName(id) };
+      });
+      if (modelsList.length > 0) defaultModel = modelsList[0].id;
+      copilotAuthenticated = true; // NVIDIA uses its own API key, not GitHub auth
+    } catch (err) {
+      console.error('Failed to get NVIDIA models for status:', err.message);
+      // Use fallback on error
+      const fallback = getNvidiaFallbackModels();
+      modelsList = fallback.map(m => {
+        const id = m.id || m.name;
+        return { id, name: getNvidiaModelDisplayName(id) };
+      });
+      if (modelsList.length > 0) defaultModel = modelsList[0].id;
+    }
+  } else if (LLM_PROVIDER === 'nvidia' && !process.env.NVIDIA_API_KEY) {
+    // NVIDIA selected but no API key configured
+    console.warn('⚠️ NVIDIA provider selected but NVIDIA_API_KEY not set');
+    modelsList = [];
+    copilotAuthenticated = false;
+  } else {
+    // Unsupported or inactive provider
+    console.warn(`⚠️  LLM provider "${LLM_PROVIDER}" is not active or unsupported.`);
+    modelsList = [];
+    copilotAuthenticated = false;
   }
   
   // Fallback to hardcoded default
   if (!defaultModel) {
-    defaultModel = 'llama3.2';
+    defaultModel = LLM_PROVIDER === 'ollama' ? 'llama3.2' :
+                   'meta/llama-3.1-8b-instruct';
   }
   
   // Debug logging
@@ -1207,30 +1268,40 @@ app.get('/api/chat/status', requireAuth, async (req, res) => {
     userId: req.user.id,
     hasCopilot,
     hasSession,
-    ollamaHost: process.env.OLLAMA_HOST || 'not set',
-    ollamaModel: defaultModel,
-    modelsCount: modelsList.length
+    provider: LLM_PROVIDER,
+    defaultModel,
+    modelsCount: modelsList.length,
+    copilotAuthenticated
   });
   
   res.json({
     success: true,
     copilotAvailable: hasCopilot,
-    hasSession: hasSession,
+    piAgentAvailable,
+    copilotAuthenticated,
+    copilotUser,
+    hasSession,
     messageCount: firstSession?.history?.length || 0,
-    ollamaConfigured: !!process.env.OLLAMA_HOST,
+    ollamaConfigured: LLM_PROVIDER === 'ollama' && !!process.env.OLLAMA_HOST,
     ollamaHost: process.env.OLLAMA_HOST,
-    ollamaModel: defaultModel,
+    ollamaModel: LLM_PROVIDER === 'ollama' ? defaultModel : null,
+    llmProvider: LLM_PROVIDER,
     availableModels: modelsList
   });
 });
 
+// Check host GitHub CLI auth status (for debugging)
+
+// Start Copilot client (public)
+
+// Sign out from Copilot (delete token file)
+
 // Get available LLM models
 app.get('/api/chat/models', requireAuth, async (req, res) => {
   try {
-    // If Ollama is configured, fetch actual available models
     let models = [];
     
-    if (process.env.OLLAMA_HOST) {
+    if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
       const ollamaModels = await getAvailableOllamaModels();
       if (ollamaModels.length > 0) {
         models = ollamaModels.map(m => ({
@@ -1240,23 +1311,65 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
           size: m.size
         }));
       }
+    } else if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
+      // Fetch NVIDIA NIM models from API (or use fallback)
+      let nvidiaModels = await getAvailableNvidiaModels();
+      if (nvidiaModels.length === 0) {
+        nvidiaModels = getNvidiaFallbackModels();
+        console.log('📋 Using NVIDIA fallback model list for /api/chat/models');
+      }
+      if (nvidiaModels.length > 0) {
+        models = nvidiaModels.map(m => ({
+          id: m.id || m.name,
+          name: getNvidiaModelDisplayName(m.id || m.name) || m.name || m.id,
+          type: 'nvidia'
+        }));
+      }
+    } else {
+      // Unsupported provider — return empty list
+      console.warn(`⚠️  LLM provider "${LLM_PROVIDER}" is not supported. Only Ollama and NVIDIA NIM are available.`);
     }
     
-    // Fallback to defaults if no Ollama models found
-    if (models.length === 0) {
-      models = [
+    // Comprehensive fallback defaults (merged with SDK results below)
+    let fallbackModels = [];
+    if (LLM_PROVIDER === 'ollama') {
+      fallbackModels = [
         { id: 'llama3.2', name: 'Llama 3.2', type: 'ollama' },
-        { id: 'codellama', name: 'CodeLlama', type: 'ollama' },
-        { id: 'mistral', name: 'Mistral', type: 'ollama' }
+        { id: 'codellama', name: 'CodeLlama', type: 'ollama' }
       ];
+    } else if (LLM_PROVIDER === 'nvidia') {
+      fallbackModels = getNvidiaFallbackModels().map(m => ({
+        id: m.id || m.name,
+        name: getNvidiaModelDisplayName(m.id || m.name),
+        type: 'nvidia'
+      }));
+    } else {
+      fallbackModels = [];
+    }
+
+    // Merge SDK results with fallback, deduplicate by id
+    const seen = new Set(models.map(m => m.id));
+    for (const fm of fallbackModels) {
+      if (!seen.has(fm.id)) {
+        models.push(fm);
+        seen.add(fm.id);
+      }
+    }
+
+    // If still empty, use fallback as sole list
+    if (models.length === 0) {
+      models = fallbackModels;
     }
     
     res.json({
       success: true,
       models,
+      llmProvider: LLM_PROVIDER,
       provider: {
-        type: 'ollama',
-        url: process.env.OLLAMA_HOST || 'http://localhost:11434'
+        type: LLM_PROVIDER,
+        url: LLM_PROVIDER === 'ollama' ? (process.env.OLLAMA_HOST || 'http://localhost:11434') :
+             LLM_PROVIDER === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' :
+             'GitHub Copilot Cloud'
       }
     });
   } catch (err) {
@@ -1337,8 +1450,8 @@ app.post('/api/chat/test-connection', requireAuth, async (req, res) => {
   try {
     const { model } = req.body;
     
-    // First check Ollama directly if configured
-    if (process.env.OLLAMA_HOST) {
+    // First check Ollama directly if configured (only in Ollama mode)
+    if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
       try {
         const ollamaUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
         const healthResponse = await fetch(`${ollamaUrl}/api/tags`);
@@ -1368,55 +1481,12 @@ app.post('/api/chat/test-connection', requireAuth, async (req, res) => {
       }
     }
     
-    if (!copilotClient) {
-      return res.status(503).json({ 
-        success: false, 
-        message: 'Copilot client not initialized' 
-      });
-    }
-    
-    // Create a test session with the specified model
-    const testConfig = {
-      onPermissionRequest: approveAll,
-      model: model || 'llama3.2'
-    };
-    
-    // Add BYOK provider if configured
-    // Note: Ollama's OpenAI-compatible API is at /v1 endpoint
-    if (process.env.OLLAMA_HOST) {
-      const ollamaBaseUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
-      const openAiCompatibleUrl = ollamaBaseUrl.endsWith('/v1') ? ollamaBaseUrl : `${ollamaBaseUrl}/v1`;
-      testConfig.provider = {
-        type: 'openai',
-        baseUrl: openAiCompatibleUrl,
-        apiKey: 'ollama'
-      };
-    }
-    
-    console.log(`🔍 Testing Copilot SDK connection with model: ${testConfig.model}`);
-    
-    // Try to create a session
-    const session = await copilotClient.createSession(testConfig);
-    
-    // Send a simple test message
-    try {
-      await session.send({ prompt: 'Hi' });
-      console.log('✅ Copilot SDK connection test successful');
-    } catch (sendErr) {
-      console.log('⚠️ Test message send error:', sendErr.message);
-      // Even if send fails, session creation succeeded
-    }
-    
-    // Disconnect the test session
-    try {
-      await session.disconnect();
-    } catch (e) {}
-    
+    // PI Agent — Copilot SDK removed. Connection verified via provider health check above.
     res.json({
       success: true,
-      message: 'Connection successful',
-      model: testConfig.model,
-      provider: process.env.OLLAMA_HOST ? 'byok' : 'github'
+      message: 'PI Agent connection ready',
+      model: model || (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct'),
+      provider: LLM_PROVIDER
     });
   } catch (err) {
     console.error('Connection test failed:', err);
@@ -1453,10 +1523,9 @@ app.post('/api/chat/test-connection', requireAuth, async (req, res) => {
 app.post('/api/chat/init', requireAuth, async (req, res) => {
   try {
     if (!CopilotClient) {
-      const errDetail = copilotSdkImportError ? ` (${copilotSdkImportError})` : '';
       return res.status(503).json({ 
         success: false, 
-        message: `Copilot SDK not available${errDetail}. To enable chat, install it with: npm install @github/copilot-sdk (requires GitHub Package Registry auth). If you already installed it, check the server console for the actual import error.`
+        message: 'Copilot SDK not installed. Run: npm install @github/copilot-sdk'
       });
     }
     
@@ -1475,14 +1544,19 @@ app.post('/api/chat/init', requireAuth, async (req, res) => {
     if (userSessions instanceof Map) {
       for (const [sessionId, sessionData] of userSessions) {
         try {
-          await sessionData.session.disconnect();
+          if (sessionData.agentEngine === 'pi-agent') {
+            await endPiSession(sessionData.piSessionId || sessionId);
+          } else if (sessionData.session) {
+            await sessionData.session.disconnect();
+          }
         } catch (e) {}
       }
       userSessions.clear();
     }
     
-    const { model } = req.body;
-    const { session, sessionId, history } = await initCopilotChatSession(req.user.id, model);
+    const { model, workingDirectory, path: clientPath } = req.body;
+    const clientWorkingDir = workingDirectory || clientPath || WORKSPACE_DIR;
+    const { session, sessionId, history } = await initCopilotChatSession(req.user.id, model, null, clientWorkingDir);
     
     res.json({
       success: true,
@@ -1556,9 +1630,26 @@ app.post('/api/chat/send', requireAuth, async (req, res) => {
       timestamp: Date.now()
     });
     chatData.lastActivity = Date.now();
-    
-    // Send to Copilot
-    await chatData.session.send({ prompt: message });
+
+    // CRITICAL FIX: Persist user message to SQLite database
+    // WebSocket chat_send handler does this, but REST endpoint never did - causing messages to disappear on reload
+    addChatMessage(chatData.sessionId, 'user', message);
+
+    // Send to agent engine
+    if (chatData.agentEngine === 'pi-agent') {
+      const sendPromise = sendPiPrompt(chatData.piSessionId || targetSessionId, message);
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('PI Agent request timed out after 120 seconds.')), 120000);
+      });
+      await Promise.race([sendPromise, timeoutPromise]);
+    } else {
+      // Send to Copilot
+      // Estimate input tokens for fallback tracking
+      if (!chatData.sdkUsageReceived) {
+        chatData.totalInputTokens += estimateTokens(message);
+      }
+      await chatData.session.send({ prompt: message });
+    }
     
     res.json({ success: true, message: 'Message sent', sessionId: targetSessionId });
   } catch (err) {
@@ -1602,7 +1693,11 @@ app.post('/api/chat/clear', requireAuth, async (req, res) => {
   if (userSessions instanceof Map) {
     for (const [sessionId, sessionData] of userSessions) {
       try {
-        await sessionData.session.disconnect();
+        if (sessionData.agentEngine === 'pi-agent') {
+          await endPiSession(sessionData.piSessionId || sessionId);
+        } else if (sessionData.session) {
+          await sessionData.session.disconnect();
+        }
       } catch (e) {}
       closeChatSession(sessionData.sessionId);
     }
@@ -1627,7 +1722,8 @@ app.get('/api/chat/sessions', requireAuth, async (req, res) => {
     const userSessions = chatSessions.get(req.user.id);
     
     // Combine with in-memory status and get messages for each session
-    const sessions = dbSessions.map(dbSession => {
+    const sessions = [];
+    for (const dbSession of dbSessions) {
       let isActive = false;
       let clientSessionId = null;
       
@@ -1641,15 +1737,24 @@ app.get('/api/chat/sessions', requireAuth, async (req, res) => {
         }
       }
       
+      // Validate model for current provider before exposing to frontend
+      let displayModel = dbSession.model;
+      if (!(await validateModelForProvider(displayModel))) {
+        displayModel = (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct');
+        // Update the DB record so stale model is cleaned up for next time
+        try { updateChatSessionModel(dbSession.id, displayModel); } catch(e) {}
+      }
+      
       // Get recent messages for this session
       const messages = getRecentChatMessages(dbSession.id, 50);
       
-      return {
+      sessions.push({
         serverSessionId: dbSession.id,
         clientSessionId: clientSessionId,
         name: dbSession.session_name,
-        model: dbSession.model,
+        model: displayModel,
         provider: dbSession.provider,
+        agentEngine: dbSession.agent_engine || 'copilot-sdk',
         sdkSessionId: dbSession.sdk_session_id,
         workingDirectory: dbSession.working_directory,
         summary: dbSession.summary,
@@ -1658,8 +1763,8 @@ app.get('/api/chat/sessions', requireAuth, async (req, res) => {
         isActive: isActive,
         messageCount: dbSession.message_count,
         messages: messages
-      };
-    });
+      });
+    }
     
     res.json({ success: true, sessions });
   } catch (err) {
@@ -1687,7 +1792,9 @@ app.get('/api/chat/sessions/:sessionId', requireAuth, async (req, res) => {
         name: dbSession.session_name,
         model: dbSession.model,
         provider: dbSession.provider,
+        agentEngine: dbSession.agent_engine || 'copilot-sdk',
         sdkSessionId: dbSession.sdk_session_id,
+        workingDirectory: dbSession.working_directory,
         summary: dbSession.summary,
         createdAt: dbSession.created_at,
         lastActivity: dbSession.last_activity,
@@ -1712,33 +1819,37 @@ app.post('/api/chat/sessions/:sessionId/resume', requireAuth, async (req, res) =
       return res.status(404).json({ success: false, message: 'Session not found' });
     }
     
-    if (!copilotClient) {
-      const initialized = await initCopilotClient();
-      if (!initialized) {
-        return res.status(503).json({ 
-          success: false, 
-          message: 'Failed to initialize Copilot client'
-        });
-      }
-    }
+    // PI Agent resume — Copilot SDK removed
     
     // Close existing active sessions
     const existing = chatSessions.get(req.user.id);
     if (existing instanceof Map) {
       for (const [sessionId, sessionData] of existing) {
         try {
-          await sessionData.session.disconnect();
+          if (sessionData.agentEngine === 'pi-agent') {
+            await endPiSession(sessionData.piSessionId || sessionId);
+          } else if (sessionData.session) {
+            await sessionData.session.disconnect();
+          }
         } catch (e) {}
       }
     }
     
     // Resume the session (use SDK session ID if available)
-    const useModel = model || dbSession.model || 'llama3.2';
+    const useModel = model || dbSession.model || (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct');
     const sdkSessionId = dbSession.sdk_session_id;
     
     console.log(`📂 Resuming session ${sessionId} with SDK ID: ${sdkSessionId}`);
     
-    const result = await initCopilotChatSession(req.user.id, useModel, sdkSessionId);
+    const result = {
+      sessionId: dbSession.id,
+      sdkSessionId: dbSession.sdk_session_id,
+      history: getRecentChatMessages(dbSession.id, 50).map(m => ({
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp
+      }))
+    };
     
     res.json({
       success: true,
@@ -1796,6 +1907,264 @@ app.get('/api/status', requireAuth, (req, res) => {
   });
 });
 
+// ==========================================
+// TTS API Endpoints
+// ==========================================
+
+// Generate TTS audio (protected)
+// ── TTS text sanitizer: strip markdown so Edge-TTS doesn't read stars, dashes, etc. ──
+function cleanTtsText(raw) {
+  if (!raw) return '';
+  let t = raw;
+
+  // Preserve file paths before stripping markdown — extract them and replace with placeholders
+  const paths = [];
+  const pathRegex = /(?:[A-Za-z]:[\\/][^\s<>"|*?]+|\/(?:[^\s<>"|*?]+\/)*[^\s<>"|*?]+|\.\.?\/(?:[^\s<>"|*?]+\/)*[^\s<>"|*?]+)/g;
+  t = t.replace(pathRegex, (match) => {
+    // Only keep plausible paths (contain a slash or backslash, and at least one dot or word char after)
+    if (match.length < 3 || (!match.includes('/') && !match.includes('\\'))) return match;
+    paths.push(match);
+    return `__TTSPATH${paths.length - 1}__`;
+  });
+
+  // Remove HTML tags
+  t = t.replace(/<[^\u003e]+>/g, ' ');
+  // Remove markdown links — keep the visible text
+  t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  t = t.replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1');
+  // Remove bold / italic markers
+  t = t.replace(/\*{2,3}/g, ' ');
+  t = t.replace(/_{2,3}/g, ' ');
+  t = t.replace(/(?<!\w)[*_](?!\w)/g, ' ');
+  // Remove inline code backticks and fenced code blocks
+  t = t.replace(/```[\s\S]*?```/g, ' ');
+  t = t.replace(/`([^`]+)`/g, '$1');
+  // Remove markdown headers
+  t = t.replace(/^#{1,6}\s+/gm, ' ');
+  // Remove blockquotes and common list bullets at line start
+  t = t.replace(/^[\s]*[\>\-\*\+]\s+/gm, ' ');
+  // Remove horizontal rules
+  t = t.replace(/^[\s]*(?:-{3,}|\*{3,}|_{3,})[\s]*$/gm, ' ');
+  // Collapse multiple spaces / newlines
+  t = t.replace(/\s+/g, ' ').trim();
+
+  // Restore preserved paths
+  paths.forEach((p, i) => {
+    t = t.replace(`__TTSPATH${i}__`, p);
+  });
+
+  return t;
+}
+
+app.post('/api/tts', requireAuth, async (req, res) => {
+  try {
+    const { text, voice = TTS_VOICE, speed = 1.0 } = req.body;
+    if (!text?.trim()) {
+      return res.status(400).json({ success: false, error: 'Text is required' });
+    }
+
+    if (!TTS_ENABLED) {
+      return res.status(503).json({ success: false, error: 'TTS is disabled on this server' });
+    }
+
+    if (!ttsProcess) {
+      return res.status(503).json({ success: false, error: 'TTS engine is not running' });
+    }
+
+    // Wait for backend to be initialized
+    if (!ttsBackendName) {
+      return res.status(503).json({ success: false, error: 'TTS worker is starting, please wait a moment' });
+    }
+
+    // Strip markdown / special chars so TTS doesn't read them aloud
+    const cleanText = cleanTtsText(text);
+
+    // Check cache (hash uses cleaned text so identical markdown yields same audio)
+    const hash = crypto.createHash('md5').update(voice + '|' + speed + '|' + cleanText).digest('hex');
+    if (ttsCache.has(hash)) {
+      return res.json({ success: true, audioUrl: ttsCache.get(hash), cached: true });
+    }
+
+    // Send job to Python worker
+    const id = String(++ttsRequestId);
+    const outputPath = join(__dirname, 'tts', `${id}.mp3`);
+    const promise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ttsCallbacks.delete(id);
+        reject(new Error('TTS generation timed out (60s)'));
+      }, 60000);
+      ttsCallbacks.set(id, { resolve: (val) => { clearTimeout(timeout); resolve(val); }, reject });
+      try {
+        ttsProcess.stdin.write(JSON.stringify({ id, text: cleanText, voice, speed, output: outputPath }) + '\n');
+      } catch (err) {
+        ttsCallbacks.delete(id);
+        clearTimeout(timeout);
+        reject(new Error('TTS worker stdin write failed: ' + err.message));
+      }
+    });
+
+    const result = await promise;
+    if (result.success) {
+      // Convert local file path to a servable URL path
+      let audioUrl = result.audioUrl || result.audio;
+      if (audioUrl && !audioUrl.startsWith('http')) {
+        const filename = basename(audioUrl);
+        audioUrl = `/tts/${filename}`;
+      }
+      if (ttsCache.size >= TTS_MAX_CACHE) {
+        const first = ttsCache.keys().next().value;
+        ttsCache.delete(first);
+      }
+      ttsCache.set(hash, audioUrl);
+      const duration = result.duration || (cleanText.length / 13);
+      res.json({ success: true, audioUrl, duration, sampleRate: result.sampleRate });
+    } else {
+      console.error('TTS generation failed:', result.error);
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch (err) {
+    console.error('TTS error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// List available Edge-TTS voices (protected)
+app.get('/api/tts/voices', requireAuth, (req, res) => {
+  const voices = [
+    // American female
+    { id: 'af_heart',  name: 'American English – Heart',  lang: 'en', gender: 'female' },
+    { id: 'af_alloy',  name: 'American English – Alloy',  lang: 'en', gender: 'female' },
+    { id: 'af_aoede',  name: 'American English – Aoede',  lang: 'en', gender: 'female' },
+    { id: 'af_bella',  name: 'American English – Bella',  lang: 'en', gender: 'female' },
+    { id: 'af_jessica',name: 'American English – Jessica',lang: 'en', gender: 'female' },
+    { id: 'af_kore',   name: 'American English – Kore',   lang: 'en', gender: 'female' },
+    { id: 'af_nicole', name: 'American English – Nicole', lang: 'en', gender: 'female' },
+    { id: 'af_nova',   name: 'American English – Nova',   lang: 'en', gender: 'female' },
+    { id: 'af_river',  name: 'American English – River',  lang: 'en', gender: 'female' },
+    { id: 'af_sarah',  name: 'American English – Sarah',  lang: 'en', gender: 'female' },
+    { id: 'af_sky',    name: 'American English – Sky',    lang: 'en', gender: 'female' },
+    // American male
+    { id: 'am_adam',   name: 'American English – Adam',   lang: 'en', gender: 'male' },
+    { id: 'am_echo',   name: 'American English – Echo',   lang: 'en', gender: 'male' },
+    { id: 'am_eric',   name: 'American English – Eric',   lang: 'en', gender: 'male' },
+    { id: 'am_fenrir', name: 'American English – Fenrir', lang: 'en', gender: 'male' },
+    { id: 'am_liam',   name: 'American English – Liam',   lang: 'en', gender: 'male' },
+    { id: 'am_michael',name: 'American English – Michael',lang: 'en', gender: 'male' },
+    { id: 'am_onyx',   name: 'American English – Onyx',   lang: 'en', gender: 'male' },
+    { id: 'am_puck',   name: 'American English – Puck',   lang: 'en', gender: 'male' },
+    { id: 'am_santa',  name: 'American English – Santa',  lang: 'en', gender: 'male' },
+    // British female
+    { id: 'bf_alice',  name: 'British English – Alice',   lang: 'en', gender: 'female' },
+    { id: 'bf_emma',   name: 'British English – Emma',    lang: 'en', gender: 'female' },
+    { id: 'bf_isabella',name:'British English – Isabella',lang: 'en', gender: 'female' },
+    { id: 'bf_lily',   name: 'British English – Lily',    lang: 'en', gender: 'female' },
+    // British male
+    { id: 'bm_daniel', name: 'British English – Daniel',  lang: 'en', gender: 'male' },
+    { id: 'bm_fable',  name: 'British English – Fable',   lang: 'en', gender: 'male' },
+    { id: 'bm_george', name: 'British English – George',  lang: 'en', gender: 'male' },
+    { id: 'bm_lewis',  name: 'British English – Lewis',   lang: 'en', gender: 'male' },
+  ];
+  res.json({ success: true, voices });
+});
+
+// TTS health/status (protected)
+app.get('/api/tts/status', requireAuth, (req, res) => {
+  res.json({
+    success: true,
+    enabled: TTS_ENABLED,
+    workerAlive: !!ttsProcess && ttsProcess.exitCode === null,
+    cacheSize: ttsCache.size
+  });
+});
+
+// ==========================================
+// TTS Admin Control (no auth — for launcher management)
+// ==========================================
+
+app.post('/api/tts/admin/start', (req, res) => {
+  if (!TTS_ENABLED) {
+    return res.status(503).json({ success: false, error: 'TTS is disabled via TTS_ENABLED env var' });
+  }
+  if (ttsProcess && ttsProcess.exitCode === null) {
+    return res.json({ success: true, message: 'TTS worker already running' });
+  }
+  if (ttsPermanentlyDisabled) {
+    // Allow retry by resetting permanent disable when explicitly requested
+    ttsPermanentlyDisabled = false;
+    ttsRetryCount = 0;
+    console.log('🔄 TTS permanent disable reset by admin start request');
+  }
+  startTtsWorker();
+  res.json({ success: true, message: 'TTS worker start requested' });
+});
+
+app.post('/api/tts/admin/stop', (req, res) => {
+  if (ttsProcess && ttsProcess.exitCode === null) {
+    ttsProcess.kill();
+    ttsProcess = null;
+    ttsRetryCount = 0;
+    console.log('🛑 TTS worker stopped by admin request');
+    return res.json({ success: true, message: 'TTS worker stopped' });
+  }
+  res.json({ success: true, message: 'TTS worker was not running' });
+});
+
+app.get('/api/tts/admin/status', (req, res) => {
+  res.json({
+    success: true,
+    envEnabled: TTS_ENABLED,
+    workerAlive: !!ttsProcess && ttsProcess.exitCode === null,
+    permanentlyDisabled: ttsPermanentlyDisabled,
+    retryCount: ttsRetryCount,
+    cacheSize: ttsCache.size,
+    backend: ttsBackendName
+  });
+});
+
+// ==========================================
+// STT (Speech-to-Text) API
+// ==========================================
+
+import { createReadStream, unlinkSync } from 'fs';
+
+app.post('/api/stt', requireAuth, audioUpload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No audio file uploaded' });
+
+    console.log(`🎙️ Received audio for STT: ${req.file.path} (${req.file.size} bytes)`);
+
+    // --- INTEGRATION POINT: Choose your STT engine ---
+
+    // OPTION A: OpenAI Whisper (requires openai package + key)
+    if (process.env.OPENAI_API_KEY) {
+      /*
+      const transcription = await openai.audio.transcriptions.create({
+        file: createReadStream(req.file.path),
+        model: "whisper-1",
+      });
+      unlinkSync(req.file.path);
+      return res.json({ success: true, text: transcription.text });
+      */
+    }
+
+    // OPTION B: Mock for testing
+    // In a real scenario, you'd spawn a python script or call a local whisper API
+    setTimeout(() => {
+      try { unlinkSync(req.file.path); } catch(e) {}
+    }, 5000);
+
+    // Fallback/Mock
+    res.json({
+      success: true,
+      text: "This is a simulated transcription. Set OPENAI_API_KEY or integrate a local STT engine to see real results."
+    });
+
+  } catch (err) {
+    console.error('STT error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Update chat session summary
 app.put('/api/chat/sessions/:sessionId/summary', requireAuth, async (req, res) => {
   try {
@@ -1817,6 +2186,50 @@ app.put('/api/chat/sessions/:sessionId/summary', requireAuth, async (req, res) =
   } catch (err) {
     console.error('Error updating summary:', err);
     res.status(500).json({ success: false, message: 'Failed to update summary' });
+  }
+});
+
+// Delete chat session
+app.delete('/api/chat/sessions/:sessionId', requireAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    // Check if session exists
+    const dbSession = getChatSessionById(sessionId, req.user.id);
+    if (!dbSession) {
+      return res.status(404).json({ success: false, message: 'Session not found' });
+    }
+
+    // Close any active SDK session
+    const userSessions = chatSessions.get(req.user.id);
+    if (userSessions instanceof Map) {
+      const sessionData = userSessions.get(sessionId);
+      if (sessionData?.session) {
+        try {
+          await sessionData.session.disconnect();
+        } catch (e) {
+          console.log('Error disconnecting SDK session:', e.message);
+        }
+        userSessions.delete(sessionId);
+      }
+      // Also check if stored by serverSessionId
+      for (const [key, entry] of userSessions) {
+        if (entry.sessionId === sessionId && key !== sessionId) {
+          userSessions.delete(key);
+        }
+      }
+    }
+
+    // Delete from database
+    const result = deleteChatSession(sessionId, req.user.id);
+    if (result.success) {
+      res.json({ success: true, message: 'Session deleted' });
+    } else {
+      res.status(500).json({ success: false, message: result.error || 'Failed to delete session' });
+    }
+  } catch (err) {
+    console.error('Error deleting session:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete session' });
   }
 });
 
@@ -2052,15 +2465,15 @@ wss.on('connection', (ws) => {
           
           // Get shell configuration - use selected shell or default
           let shellConfig;
-          const selectedShellId = message.shell || (platform() === 'win32' ? 'powershell' : 'bash');
+          const selectedShellId = message.shell || (os.platform() === 'win32' ? 'powershell' : 'bash');
           const availableTerminals = getAvailableTerminals();
           shellConfig = availableTerminals.find(t => t.id === selectedShellId);
           
           // Fallback to default if selected shell not found
           if (!shellConfig) {
             shellConfig = availableTerminals.find(t => t.recommended) || availableTerminals[0] || {
-              id: platform() === 'win32' ? 'powershell' : 'bash',
-              command: platform() === 'win32' ? 'powershell.exe' : 'bash',
+              id: os.platform() === 'win32' ? 'powershell' : 'bash',
+              command: os.platform() === 'win32' ? 'powershell.exe' : 'bash',
               args: []
             };
           }
@@ -2071,6 +2484,7 @@ wss.on('connection', (ws) => {
             // Reconnect to existing terminal
             existingTerm.ws = ws;
             existingTerm.lastActivity = Date.now();
+            delete existingTerm.disconnectedAt;
             
             ws.send(JSON.stringify({ 
               type: 'terminal_started',
@@ -2243,9 +2657,11 @@ wss.on('connection', (ws) => {
           }
           
           // Client requesting directory browse
-          const browsePath = message.path || WORKSPACE_DIR;
+          const defaultBrowsePath = WORKSPACE_DIR;
+          const browsePath = message.path || defaultBrowsePath;
           try {
             const resolvedPath = resolve(browsePath);
+            
             if (!existsSync(resolvedPath)) {
               ws.send(JSON.stringify({ 
                 type: 'browse_result', 
@@ -2325,51 +2741,91 @@ wss.on('connection', (ws) => {
             return;
           }
           
-          if (!CopilotClient) {
-            const errDetail = copilotSdkImportError ? `: ${copilotSdkImportError}` : '';
-            console.log('❌ chat_session_create failed: Copilot SDK not installed' + errDetail);
+          const agentEngine = message.agentEngine || DEFAULT_AGENT_ENGINE;
+          
+          if (agentEngine === 'copilot-sdk' && !CopilotClient) {
+            console.log('❌ chat_session_create failed: Copilot SDK not installed');
             ws.send(JSON.stringify({
               type: 'chat_error',
-              message: `Copilot SDK not installed${errDetail}. Install: npm install @github/copilot-sdk (requires GitHub auth)`
+              message: 'Copilot SDK not installed'
             }));
             return;
           }
           
+          if (agentEngine === 'pi-agent') {
+            console.log('🔧 Using PI Agent engine for new session');
+          }
+          
           (async () => {
+            const clientSessionId = message.sessionId || `session_${Date.now()}`;
+            const sessionName = message.name || 'New Chat';
+            let model = message.model;
+            let userLocks;
             try {
-              if (!copilotClient) {
-                console.log('🔄 Initializing Copilot client...');
-                await initCopilotClient();
+              if (agentEngine === 'copilot-sdk') {
+                if (!copilotClient) {
+                  console.log('🔄 Initializing Copilot client...');
+                  await initCopilotClient();
+                }
+                
+                if (!copilotClient) {
+                  console.log('❌ chat_session_create failed: Copilot client initialization failed');
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    message: 'Failed to initialize Copilot client'
+                  }));
+                  return;
+                }
               }
               
-              if (!copilotClient) {
-                console.log('❌ chat_session_create failed: Copilot client initialization failed');
-                ws.send(JSON.stringify({
-                  type: 'chat_error',
-                  message: 'Failed to initialize Copilot client'
-                }));
+              // Prevent duplicate session creation for the same clientSessionId
+              userLocks = creationLocks.get(clientData.userId);
+              if (!userLocks) {
+                userLocks = new Set();
+                creationLocks.set(clientData.userId, userLocks);
+              }
+              if (userLocks.has(clientSessionId)) {
+                console.log(`⛔ Duplicate chat_session_create blocked for ${clientSessionId}`);
                 return;
               }
+              userLocks.add(clientSessionId);
               
-              const clientSessionId = message.sessionId || `session_${Date.now()}`;
-              const sessionName = message.name || 'New Chat';
-              
-              // Resolve model: prefer client choice, then first available Ollama model, then hardcoded fallback
-              let model = message.model;
-              let availableOllamaModels = [];
-              if (process.env.OLLAMA_HOST) {
-                availableOllamaModels = await getAvailableOllamaModels();
+              // Resolve model: prefer client choice, then first available model, then hardcoded fallback
+              let availableModelList = [];
+              if (LLM_PROVIDER === 'ollama') {
+                availableModelList = await getAvailableOllamaModels();
+              } else if (LLM_PROVIDER === 'nvidia') {
+                availableModelList = await getAvailableNvidiaModels();
+                if (availableModelList.length === 0) {
+                  availableModelList = getNvidiaFallbackModels();
+                }
+              } else if (agentEngine === 'copilot-sdk' && copilotClient) {
+                try {
+                  const sdkModels = await copilotClient.listModels();
+                  availableModelList = sdkModels.map(m => ({ name: m.id }));
+                } catch (modelErr) {
+                  console.warn('⚠️ listModels() failed, using fallback model list:', modelErr.message);
+                  availableModelList = getCopilotFallbackModels();
+                }
+              } else {
+                availableModelList = getCopilotFallbackModels();
               }
-              if (!model && availableOllamaModels.length > 0) {
-                model = availableOllamaModels[0].name || availableOllamaModels[0].model;
+
+              if (!model && availableModelList.length > 0) {
+                model = availableModelList[0].name || availableModelList[0].id;
               }
-              model = model || 'llama3.2';
+              // Set default model based on provider
+              if (!model) {
+                if (LLM_PROVIDER === 'ollama') model = 'llama3.2';
+                else if (LLM_PROVIDER === 'nvidia') model = 'meta/llama-3.1-8b-instruct';
+                else model = 'meta/llama-3.1-8b-instruct';
+              }
               
               console.log(`🔧 Creating session: ${sessionName} (${clientSessionId}) with model: ${model}`);
               
-              // Pre-check: Validate model is available in Ollama
-              if (process.env.OLLAMA_HOST) {
-                const modelIds = availableOllamaModels.map(m => m.name || m.model);
+              // Pre-check: Validate model is available for the selected provider
+              if (LLM_PROVIDER === 'ollama') {
+                const modelIds = availableModelList.map(m => m.name || m.model);
                 
                 if (!modelIds.includes(model)) {
                   console.error(`❌ Model "${model}" is not available in Ollama`);
@@ -2378,175 +2834,208 @@ wss.on('connection', (ws) => {
                     type: 'chat_error',
                     message: `Model "${model}" is not available in Ollama. Available models: ${modelIds.join(', ') || 'None found'}. Run "ollama pull ${model}" to download it, or select a different model.`
                   }));
+                  userLocks.delete(clientSessionId);
                   return;
                 }
               }
               
+              if (LLM_PROVIDER === 'nvidia') {
+                const modelIds = availableModelList.map(m => m.id || m.name);
+                if (!modelIds.includes(model)) {
+                  const fallback = 'meta/llama-3.1-8b-instruct';
+                  console.warn(`⚠️ Model "${model}" not valid for NVIDIA, using fallback: ${fallback}`);
+                  model = fallback;
+                  // Notify frontend of the model change
+                  ws.send(JSON.stringify({
+                    type: 'chat_model_changed',
+                    clientSessionId: clientSessionId,
+                    model: fallback,
+                    originalModel: message.model,
+                    message: `Model switched to ${fallback} (original model not available on NVIDIA)`
+                  }));
+                }
+              }
+              
               // Create session in database
-              const dbResult = createChatSession(clientData.userId, sessionName, model, 'ollama', null, message.workingDirectory || null);
+              const dbResult = createChatSession(clientData.userId, sessionName, model, LLM_PROVIDER, null, message.workingDirectory || null);
               
               if (!dbResult.success) {
                 ws.send(JSON.stringify({
                   type: 'chat_error',
                   message: 'Failed to create chat session in database'
                 }));
+                userLocks.delete(clientSessionId);
                 return;
               }
               
               // Normalize model name for Ollama (add :latest if no tag specified)
-              const normalizedModel = model.includes(':') ? model : `${model}:latest`;
+              const normalizedModel = LLM_PROVIDER === 'ollama' ? (model.includes(':') ? model : `${model}:latest`) : model;
               
               // Get working directory from message or use default
-              const workingDirectory = message.workingDirectory || WORKSPACE_DIR;
+              const workingDirectory = ensureWorkingDirectory(message.workingDirectory || WORKSPACE_DIR);
               
-              // Create Copilot SDK session
-              const sessionConfig = {
-                onPermissionRequest: approveAll,
-                model: normalizedModel,
-              };
+              // Create agent session based on engine selection
+              let sdkSessionId = null;
+              let chatSessionData;
               
-              // Add BYOK provider if Ollama is configured
-              // Note: Ollama's OpenAI-compatible API is at /v1 endpoint
-              if (process.env.OLLAMA_HOST) {
-                const ollamaBaseUrl = process.env.OLLAMA_HOST.replace(/\/$/, ''); // Remove trailing slash
-                const openAiCompatibleUrl = ollamaBaseUrl.endsWith('/v1') ? ollamaBaseUrl : `${ollamaBaseUrl}/v1`;
-                sessionConfig.provider = {
-                  type: 'openai',
-                  baseUrl: openAiCompatibleUrl,
-                  apiKey: 'ollama', // Ollama requires any non-empty API key
-                  wireApi: 'completions'
-                };
-                console.log(`🔧 Creating SDK session with BYOK provider:`);
-                console.log(`   - Original Model: ${model}`);
-                console.log(`   - Normalized Model: ${normalizedModel}`);
-                console.log(`   - Base URL: ${openAiCompatibleUrl}`);
-                console.log(`   - Wire API: completions`);
+              if (agentEngine === 'pi-agent') {
+                // ===== PI Agent RPC mode =====
+                const piProviderConfig = buildPiProviderConfig();
+                if (!piProviderConfig) {
+                  console.warn('⚠️  Cannot create PI Agent session — no valid provider config. Check LLM_PROVIDER and API keys.');
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    message: 'PI Agent engine requires a configured Ollama or NVIDIA NIM provider. Check your environment variables.'
+                  }));
+                  const locks = creationLocks.get(clientData.userId);
+                  if (locks) locks.delete(clientSessionId);
+                  return;
+                }
+                try {
+                  const piSession = await createPiSession(clientSessionId, sessionName, model, workingDirectory, piProviderConfig);
+                  
+                  // Persist PI's native session file path to our DB for future reconnection
+                  if (piSession.sessionFile) {
+                    updateChatSessionPiFile(dbResult.sessionId, piSession.sessionFile);
+                    console.log(`💾 PI session file persisted to DB: ${piSession.sessionFile}`);
+                  }
+                  
+                  // Wire PI events to WebSocket messages for this user
+                  wirePiSessionEvents(piSession, ws, clientSessionId, clientData, dbResult.sessionId);
+                  
+                  console.log('✅ PI Agent session created successfully');
+                  
+                  chatSessionData = {
+                    clientSessionId: clientSessionId,
+                    sessionId: dbResult.sessionId,
+                    sdkSessionId: null,
+                    session: null, // PI uses adapter, not SDK session object
+                    piSessionId: clientSessionId,
+                    agentEngine: 'pi-agent',
+                    name: sessionName,
+                    model: model,
+                    workingDirectory: workingDirectory,
+                    history: [],
+                    lastActivity: Date.now(),
+                    currentMode: 'interactive',
+                    autoApprove: true,
+                    pendingToolCalls: new Map(),
+                    totalInputTokens: 0,
+                    totalOutputTokens: 0,
+                    totalTokens: 0,
+                    totalCacheReadTokens: 0,
+                    totalCacheWriteTokens: 0,
+                    totalReasoningTokens: 0,
+                    sdkUsageReceived: false,
+                    _sending: false,
+                    _sendingTimeout: null
+                  };
+                } catch (piErr) {
+                  console.error('❌ Failed to create PI Agent session:', piErr.message);
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    message: `Failed to create PI Agent session: ${piErr.message}. Is PI installed?`
+                  }));
+                  const locks = creationLocks.get(clientData.userId);
+                  if (locks) locks.delete(clientSessionId);
+                  return;
+                }
               } else {
-                console.log(`🔧 Creating SDK session with GitHub Cloud provider:`);
-                console.log(`   - Model: ${normalizedModel}`);
-              }
-              
-              let sdkSession;
-              try {
-                console.log('📡 Calling copilotClient.createSession...');
-                console.log('📋 Session config:', JSON.stringify({
-                  ...sessionConfig,
-                  onPermissionRequest: '[Function]'
-                }, null, 2));
-                // Add timeout to session creation
-                const sessionPromise = copilotClient.createSession(sessionConfig);
-                const timeoutPromise = new Promise((_, reject) => {
-                  setTimeout(() => reject(new Error('Session creation timeout (30s)')), 30000);
-                });
-                sdkSession = await Promise.race([sessionPromise, timeoutPromise]);
-                console.log('✅ SDK session created successfully');
-              } catch (sessionErr) {
-                console.error('❌ Failed to create Copilot SDK session:', sessionErr.message);
-                console.error('Full error:', sessionErr);
-                console.error('Session config used:', JSON.stringify({
-                  ...sessionConfig,
-                  onPermissionRequest: '[Function]'
-                }, null, 2));
-                ws.send(JSON.stringify({
-                  type: 'chat_error',
-                  message: `Failed to create chat session: ${sessionErr.message}. Check your BYOK configuration.`
-                }));
-                return;
-              }
-              
-              // Extract SDK session ID
-              const sdkSessionId = sdkSession.id || sdkSession.sessionId;
-              
-              // Persist SDK session ID to database for future reconnection
-              if (sdkSessionId && dbResult?.sessionId) {
-                updateChatSessionSdkId(dbResult.sessionId, sdkSessionId);
-                console.log(`💾 Saved SDK session ID to database: ${sdkSessionId}`);
-              }
-              
-              // Store session mapping (consistent with initCopilotChatSession structure)
-              const chatSessionData = {
-                clientSessionId: clientSessionId,
-                sessionId: dbResult.sessionId,
-                sdkSessionId: sdkSessionId,
-                session: sdkSession,
-                name: sessionName,
-                model: model,
-                workingDirectory: workingDirectory, // Store for later use
-                history: [],
-                lastActivity: Date.now(),
-                currentMode: 'interactive',
-                pendingToolCalls: new Map()
-              };
-              
-              // Set up message handlers for this session (following SDK documentation)
-              console.log('📡 Setting up SDK session event handlers...');
-              
-              sdkSession.on('assistant.message', (event) => {
-                console.log('📨 SDK event: assistant.message', event.data?.content?.substring(0, 50));
-                const assistantMsg = {
-                  role: 'assistant',
-                  content: event.data.content,
-                  timestamp: Date.now()
+                // ===== Copilot SDK mode =====
+                const sessionConfig = {
+                  onPermissionRequest: createPermissionHandler(clientData.userId),
+                  model: normalizedModel,
+                  workingDirectory: workingDirectory || WORKSPACE_DIR,
                 };
-                // Update in-memory history
-                chatSessionData.history.push(assistantMsg);
-                // Persist to database
-                addChatMessage(dbResult.sessionId, 'assistant', event.data.content);
                 
-                // Broadcast to all connections for this user
-                for (const [clientWs, clientDataItem] of clients) {
-                  if (clientDataItem.userId === clientData.userId && clientWs.readyState === 1) {
-                    clientWs.send(JSON.stringify({
-                      type: 'chat_message',
-                      sessionId: dbResult.sessionId,
-                      role: 'assistant',
-                      content: event.data.content
-                    }));
-                  }
+                // Add BYOK provider for Ollama or NVIDIA
+                if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
+                  const ollamaBaseUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
+                  const openAiCompatibleUrl = ollamaBaseUrl.endsWith('/v1') ? ollamaBaseUrl : `${ollamaBaseUrl}/v1`;
+                   sessionConfig.provider = {
+                    type: 'openai',
+                    baseUrl: openAiCompatibleUrl,
+                    apiKey: 'ollama',
+                  };
+                  console.log(`🔧 Creating SDK session with BYOK provider:`);
+                  console.log(`   - Original Model: ${model}`);
+                  console.log(`   - Normalized Model: ${normalizedModel}`);
+                  console.log(`   - Base URL: ${openAiCompatibleUrl}`);
+                  console.log(`   - Wire API: completions`);
+                } else if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
+                  sessionConfig.provider = {
+                    type: 'openai',
+                    wireApi: 'completions',
+                    baseUrl: 'https://integrate.api.nvidia.com/v1',
+                    apiKey: process.env.NVIDIA_API_KEY,
+                  };
+                  console.log(`🔧 Creating SDK session with NVIDIA NIM provider:`);
+                  console.log(`   - Model: ${normalizedModel}`);
+                  console.log(`   - Base URL: https://integrate.api.nvidia.com/v1`);
+                } else {
+                  console.log(`🔧 Creating SDK session with GitHub Cloud provider:`);
+                  console.log(`   - Model: ${normalizedModel}`);
                 }
-              });
-              
-              // Handle streaming message deltas (for real-time responses)
-              sdkSession.on('assistant.message_delta', (event) => {
-                console.log('📨 SDK event: assistant.message_delta', event.data?.deltaContent?.substring(0, 30));
-                for (const [clientWs, clientDataItem] of clients) {
-                  if (clientDataItem.userId === clientData.userId && clientWs.readyState === 1) {
-                    clientWs.send(JSON.stringify({
-                      type: 'chat_stream_delta',
-                      sessionId: dbResult.sessionId,
-                      delta: event.data.deltaContent || event.data.delta || event.data.content || ''
-                    }));
-                  }
+                
+                let sdkSession;
+                try {
+                  console.log('📡 Calling copilotClient.createSession...');
+                  console.log('📋 Session config:', JSON.stringify({
+                    ...sessionConfig,
+                    onPermissionRequest: '[Function]'
+                  }, null, 2));
+                  const sessionPromise = copilotClient.createSession(sessionConfig);
+                  const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Session creation timeout (30s)')), 30000);
+                  });
+                  sdkSession = await Promise.race([sessionPromise, timeoutPromise]);
+                  console.log('✅ SDK session created successfully');
+                } catch (sessionErr) {
+                  console.error('❌ Failed to create Copilot SDK session:', sessionErr.message);
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    message: `Failed to create chat session: ${sessionErr.message}. Check your BYOK configuration.`
+                  }));
+                  const locks = creationLocks.get(clientData.userId);
+                  if (locks) locks.delete(clientSessionId);
+                  return;
                 }
-              });
-              
-              // Handle session idle (response complete)
-              sdkSession.on('session.idle', (event) => {
-                console.log('📨 SDK event: session.idle - Response complete');
-                // Notify client that response is complete
-                for (const [clientWs, clientDataItem] of clients) {
-                  if (clientDataItem.userId === clientData.userId && clientWs.readyState === 1) {
-                    clientWs.send(JSON.stringify({
-                      type: 'chat_stream_complete',
-                      sessionId: dbResult.sessionId
-                    }));
-                  }
+                
+                sdkSessionId = sdkSession.id || sdkSession.sessionId;
+                if (sdkSessionId && dbResult?.sessionId) {
+                  updateChatSessionSdkId(dbResult.sessionId, sdkSessionId);
+                  console.log(`💾 Saved SDK session ID to database: ${sdkSessionId}`);
                 }
-              });
-              
-              // Handle session errors
-              sdkSession.on('session.error', (event) => {
-                console.error('📨 SDK event: session.error', event.data);
-                for (const [clientWs, clientDataItem] of clients) {
-                  if (clientDataItem.userId === clientData.userId && clientWs.readyState === 1) {
-                    clientWs.send(JSON.stringify({
-                      type: 'chat_error',
-                      sessionId: dbResult.sessionId,
-                      message: event.data?.message || 'Session error occurred'
-                    }));
-                  }
-                }
-              });
+                
+                chatSessionData = {
+                  clientSessionId: clientSessionId,
+                  sessionId: dbResult.sessionId,
+                  sdkSessionId: sdkSessionId,
+                  session: sdkSession,
+                  piSessionId: null,
+                  agentEngine: 'copilot-sdk',
+                  name: sessionName,
+                  model: model,
+                  workingDirectory: workingDirectory,
+                  history: [],
+                  lastActivity: Date.now(),
+                  currentMode: 'interactive',
+                  autoApprove: true,
+                  pendingToolCalls: new Map(),
+                  totalInputTokens: 0,
+                  totalOutputTokens: 0,
+                  totalTokens: 0,
+                  totalCacheReadTokens: 0,
+                  totalCacheWriteTokens: 0,
+                  totalReasoningTokens: 0,
+                  sdkUsageReceived: false,
+                  _sending: false,
+                  _sendingTimeout: null
+                };
+                
+                console.log('📡 Setting up SDK session event handlers...');
+                setupSessionEventHandlers(sdkSession, clientData.userId, dbResult.sessionId);
+              }
               
               // Store in user sessions map (create if not exists)
               let userSessions = chatSessions.get(clientData.userId);
@@ -2562,19 +3051,27 @@ wss.on('connection', (ws) => {
                 clientSessionId: clientSessionId,
                 serverSessionId: dbResult.sessionId,
                 sdkSessionId: sdkSessionId,
+                agentEngine: agentEngine,
                 name: sessionName,
                 model: model,
                 workingDirectory: workingDirectory,
                 history: []
               }));
               
-              console.log(`✅ Chat session created: ${sessionName} (${clientSessionId})`);
+              console.log(`✅ Chat session created: ${sessionName} (${clientSessionId}) [engine: ${agentEngine}]`);
+              
+              // Release creation lock
+              const locks = creationLocks.get(clientData.userId);
+              if (locks) locks.delete(clientSessionId);
             } catch (err) {
               console.error('Chat session creation error:', err);
               ws.send(JSON.stringify({
                 type: 'chat_error',
                 message: err.message
               }));
+              // Release creation lock on error
+              const locks = creationLocks.get(clientData.userId);
+              if (locks) locks.delete(clientSessionId);
             }
           })();
           break;
@@ -2610,12 +3107,17 @@ wss.on('connection', (ws) => {
                   serverSessionId = sessionData.sessionId;
                   sdkSessionId = sessionData.sdkSessionId;
                   
-                  // Disconnect SDK session
+                  // End agent session
                   try {
-                    await sessionData.session.disconnect();
-                    console.log(`🔌 Disconnected SDK session: ${sdkSessionId}`);
+                    if (sessionData.agentEngine === 'pi-agent') {
+                      await endPiSession(sessionData.piSessionId || message.sessionId);
+                      console.log(`🔌 Ended PI Agent session: ${sessionData.piSessionId || message.sessionId}`);
+                    } else {
+                      await sessionData.session.disconnect();
+                      console.log(`🔌 Disconnected SDK session: ${sdkSessionId}`);
+                    }
                   } catch (e) {
-                    console.log(`⚠️ Error disconnecting SDK session: ${e.message}`);
+                    console.log(`⚠️ Error disconnecting session: ${e.message}`);
                   }
                   
                   // Remove from memory
@@ -2686,11 +3188,147 @@ wss.on('connection', (ws) => {
           
           (async () => {
             try {
+              const agentEngine = message.agentEngine || DEFAULT_AGENT_ENGINE;
+              const clientSessionId = message.sessionId;
+              const serverSessionId = message.serverSessionId;
+              let sdkSessionId = message.sdkSessionId; // SDK session ID from client
+              const sessionName = message.name || 'Chat Session';
+              const model = message.model || (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct');
+              
+              // Resolve working directory: message > database > default
+              let workingDirectory = message.workingDirectory;
+              if (!workingDirectory && serverSessionId) {
+                const dbSession = getChatSessionById(serverSessionId, clientData.userId);
+                if (dbSession?.working_directory) {
+                  workingDirectory = dbSession.working_directory;
+                }
+              }
+              workingDirectory = ensureWorkingDirectory(workingDirectory || WORKSPACE_DIR);
+              
+              // Check if session already exists in memory
+              const userSessions = chatSessions.get(clientData.userId);
+              if (userSessions instanceof Map && userSessions.has(clientSessionId)) {
+                // Already connected - just confirm, but fetch latest history from DB to ensure completeness
+                const existingSession = userSessions.get(clientSessionId);
+                // CRITICAL: Reset _sending flag so user can send messages after reconnect
+                existingSession._sending = false;
+                if (existingSession._sendingTimeout) { clearTimeout(existingSession._sendingTimeout); existingSession._sendingTimeout = null; }
+                // CRITICAL: Re-wire PI session events with the new WebSocket
+                // After page refresh, the old ws is closed (state=3) and events get dropped
+                if (existingSession.agentEngine === 'pi-agent' && existingSession.piSessionId) {
+                  const piSessionMap = getPiSession(existingSession.piSessionId);
+                  if (piSessionMap) {
+                    console.log(`🔌 Re-wiring PI session events for ${clientSessionId} with new WebSocket`);
+                    wirePiSessionEvents(piSessionMap, ws, clientSessionId, clientData, existingSession.sessionId);
+                  } else {
+                    console.warn(`⚠️ PI session ${existingSession.piSessionId} not found for re-wiring`);
+                  }
+                }
+                const existingMessages = getRecentChatMessages(existingSession.sessionId, 100);
+                ws.send(JSON.stringify({
+                  type: 'chat_session_created',
+                  success: true,
+                  clientSessionId: clientSessionId,
+                  serverSessionId: existingSession.sessionId,
+                  sdkSessionId: existingSession.sdkSessionId,
+                  agentEngine: existingSession.agentEngine || 'copilot-sdk',
+                  name: existingSession.name,
+                  model: existingSession.model,
+                  workingDirectory: existingSession.workingDirectory,
+                  history: existingMessages.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })) || []
+                }));
+                return;
+              }
+              
+              if (agentEngine === 'pi-agent') {
+                // PI Agent reconnection: use native session file if available, else start fresh
+                const piProviderConfig = buildPiProviderConfig();
+                if (!piProviderConfig) {
+                  console.warn('⚠️  Cannot reconnect PI Agent session — no valid provider config. Check LLM_PROVIDER and API keys.');
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    message: 'PI Agent engine requires a configured Ollama or NVIDIA NIM provider. Check your environment variables.'
+                  }));
+                  return;
+                }
+                let piSessionFile = null;
+                if (serverSessionId) {
+                  const dbSession = getChatSessionById(serverSessionId, clientData.userId);
+                  if (dbSession && dbSession.agent_engine !== 'pi-agent') {
+                    updateChatSessionAgentEngine(serverSessionId, 'pi-agent');
+                  }
+                  piSessionFile = dbSession?.pi_session_file || null;
+                }
+                
+                let piSession;
+                if (piSessionFile && existsSync(piSessionFile)) {
+                  console.log(`🔄 Restoring PI Agent session from native file: ${piSessionFile}`);
+                  piSession = await restorePiSession(clientSessionId, sessionName, model, workingDirectory, piSessionFile, piProviderConfig);
+                  // Native session restored — PI loads all prior conversation state from file
+                } else {
+                  console.log(`🔄 Creating fresh PI Agent session (no previous session file)`);
+                  piSession = await createPiSession(clientSessionId, sessionName, model, workingDirectory, piProviderConfig);
+                  if (piSession.sessionFile && serverSessionId) {
+                    updateChatSessionPiFile(serverSessionId, piSession.sessionFile);
+                  }
+                }
+                
+                wirePiSessionEvents(piSession, ws, clientSessionId, clientData, serverSessionId);
+                
+                const existingMessages = serverSessionId ? getRecentChatMessages(serverSessionId, 100) : [];
+                
+                const chatSessionData = {
+                  clientSessionId: clientSessionId,
+                  sessionId: serverSessionId,
+                  sdkSessionId: null,
+                  session: null,
+                  piSessionId: clientSessionId,
+                  agentEngine: 'pi-agent',
+                  name: sessionName,
+                  model: model,
+                  workingDirectory: workingDirectory,
+                  history: existingMessages.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
+                  lastActivity: Date.now(),
+                  currentMode: 'interactive',
+                  autoApprove: true,
+                  pendingToolCalls: new Map(),
+                  totalInputTokens: 0,
+                  totalOutputTokens: 0,
+                  totalTokens: 0,
+                  totalCacheReadTokens: 0,
+                  totalCacheWriteTokens: 0,
+                  totalReasoningTokens: 0,
+                  sdkUsageReceived: false,
+                  _sending: false,
+                  _sendingTimeout: null
+                };
+                
+                let sessionStore = chatSessions.get(clientData.userId);
+                if (!(sessionStore instanceof Map)) { sessionStore = new Map(); chatSessions.set(clientData.userId, sessionStore); }
+                sessionStore.set(clientSessionId, chatSessionData);
+                
+                ws.send(JSON.stringify({
+                  type: 'chat_session_created',
+                  success: true,
+                  clientSessionId: clientSessionId,
+                  serverSessionId: serverSessionId,
+                  sdkSessionId: null,
+                  agentEngine: 'pi-agent',
+                  name: sessionName,
+                  model: model,
+                  workingDirectory: workingDirectory,
+                  history: existingMessages
+                }));
+                
+                console.log(`✅ PI Agent session reconnected: ${sessionName} (${clientSessionId})`);
+                return;
+              }
+              
+              // Copilot SDK reconnection
               if (!CopilotClient) {
-                const errDetail = copilotSdkImportError ? `: ${copilotSdkImportError}` : '';
                 ws.send(JSON.stringify({
                   type: 'chat_error',
-                  message: `Copilot SDK not installed${errDetail}. Install: npm install @github/copilot-sdk (requires GitHub auth)`
+                  message: 'Copilot SDK not installed'
                 }));
                 return;
               }
@@ -2703,44 +3341,6 @@ wss.on('connection', (ws) => {
                 ws.send(JSON.stringify({
                   type: 'chat_error',
                   message: 'Failed to initialize Copilot client'
-                }));
-                return;
-              }
-              
-              const clientSessionId = message.sessionId;
-              const serverSessionId = message.serverSessionId;
-              let sdkSessionId = message.sdkSessionId; // SDK session ID from client
-              const sessionName = message.name || 'Chat Session';
-              const model = message.model || 'llama3.2';
-              
-              // Resolve working directory: message > database > default
-              let workingDirectory = message.workingDirectory;
-              if (!workingDirectory && serverSessionId) {
-                const dbSession = getChatSessionById(serverSessionId, clientData.userId);
-                if (dbSession?.working_directory) {
-                  workingDirectory = dbSession.working_directory;
-                }
-              }
-              if (!workingDirectory) {
-                workingDirectory = WORKSPACE_DIR;
-              }
-              
-              // Check if session already exists in memory
-              const userSessions = chatSessions.get(clientData.userId);
-              if (userSessions instanceof Map && userSessions.has(clientSessionId)) {
-                // Already connected - just confirm, but fetch latest history from DB to ensure completeness
-                const existingSession = userSessions.get(clientSessionId);
-                const existingMessages = getRecentChatMessages(existingSession.sessionId, 100);
-                ws.send(JSON.stringify({
-                  type: 'chat_session_created',
-                  success: true,
-                  clientSessionId: clientSessionId,
-                  serverSessionId: existingSession.sessionId,
-                  sdkSessionId: existingSession.sdkSessionId,
-                  name: existingSession.name,
-                  model: existingSession.model,
-                  workingDirectory: existingSession.workingDirectory,
-                  history: existingMessages.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })) || []
                 }));
                 return;
               }
@@ -2759,7 +3359,7 @@ wss.on('connection', (ws) => {
               console.log(`   - Server Session ID: ${serverSessionId}`);
               console.log(`   - SDK Session ID: ${sdkSessionId || 'Not provided - will create new'}`);
               
-              const result = await initCopilotChatSession(clientData.userId, model, sdkSessionId);
+              const result = await initCopilotChatSession(clientData.userId, model, sdkSessionId, workingDirectory, serverSessionId);
               
               if (!result || !result.session) {
                 throw new Error('Failed to initialize Copilot chat session');
@@ -2773,23 +3373,40 @@ wss.on('connection', (ws) => {
               // Get existing messages from database for client history
               const existingMessages = getRecentChatMessages(serverSessionId, 100);
               
-              // Update the session data stored by initCopilotChatSession with client-specific info
+              // Update the session data stored by initCopilotChatSession with client-specific info.
+              // CRITICAL: initCopilotChatSession stores the session object under serverSessionId
+              // with all required fields (_sending, _sendingTimeout). chat_send looks up by
+              // clientSessionId. We MUST use the SAME object so SDK callbacks and chat_send
+              // operate on one consistent session data object.
               const userSessionStore = chatSessions.get(clientData.userId);
-              const chatSessionData = userSessionStore?.get(clientSessionId) || {
+              const sdkSessionData = userSessionStore?.get(serverSessionId);
+              const chatSessionData = sdkSessionData || userSessionStore?.get(clientSessionId) || {
                 session: result.session,
                 sdkSessionId: result.sdkSessionId,
                 sessionId: serverSessionId,
                 history: [],
                 lastActivity: Date.now(),
                 currentMode: 'interactive',
-                pendingToolCalls: new Map()
+                autoApprove: false,
+                pendingToolCalls: new Map(),
+                _sending: false,
+                _sendingTimeout: null
               };
+              
+              // CRITICAL FIX: Ensure the clientSessionId entry points to the new live SDK session.
+              // initCopilotChatSession stores the new session under serverSessionId, but chat_send
+              // looks up by clientSessionId. If we don't update these properties here, the old
+              // dead SDK session remains in the clientSessionId slot, causing messages to fail.
+              chatSessionData.session = result.session;
+              chatSessionData.sdkSessionId = result.sdkSessionId;
+              chatSessionData.sessionId = serverSessionId;
               
               // Add client-specific properties
               chatSessionData.clientSessionId = clientSessionId;
               chatSessionData.name = sessionName;
               chatSessionData.model = model;
               chatSessionData.workingDirectory = workingDirectory;
+              chatSessionData.agentEngine = 'copilot-sdk';
               
               // Merge existing messages with any current history
               if (existingMessages.length > 0) {
@@ -2819,6 +3436,7 @@ wss.on('connection', (ws) => {
                 clientSessionId: clientSessionId,
                 serverSessionId: serverSessionId,
                 sdkSessionId: result.sdkSessionId,
+                agentEngine: 'copilot-sdk',
                 name: sessionName,
                 model: model,
                 workingDirectory: workingDirectory,
@@ -2915,9 +3533,11 @@ wss.on('connection', (ws) => {
           }
           
           (async () => {
+            let sessionData = null;
+            let sessionId = null;
             try {
               const userSessions = chatSessions.get(clientData.userId);
-              const sessionId = message.sessionId;
+              sessionId = message.sessionId;
               
               if (!(userSessions instanceof Map) || !sessionId) {
                 ws.send(JSON.stringify({
@@ -2927,7 +3547,7 @@ wss.on('connection', (ws) => {
                 return;
               }
               
-              let sessionData = userSessions.get(sessionId);
+              sessionData = userSessions.get(sessionId);
               
               if (!sessionData) {
                 ws.send(JSON.stringify({
@@ -2938,6 +3558,29 @@ wss.on('connection', (ws) => {
               }
               
               // Add user message to history
+              if (sessionData._sending) {
+                ws.send(JSON.stringify({
+                  type: 'chat_error',
+                  sessionId: sessionId,
+                  message: 'A response is already being generated. Please wait for it to complete before sending another message.'
+                }));
+                return;
+              }
+              sessionData._sending = true;
+              // Safety net: if _sending is still true after 90 seconds,
+              // reset it so the user isn't permanently blocked
+              sessionData._sendingTimeout = setTimeout(() => {
+                if (sessionData._sending) {
+                  console.warn(`⚠️ _sending flag stuck for session ${sessionId} — resetting after timeout`);
+                  sessionData._sending = false;
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    sessionId: message.sessionId,
+                    message: 'Response timed out. Please try again.'
+                  }));
+                }
+              }, 90000);
+              
               sessionData.history.push({
                 role: 'user',
                 content: message.message,
@@ -2963,12 +3606,56 @@ wss.on('connection', (ws) => {
                 console.log(`📁 Adding working directory context: ${sessionData.workingDirectory}`);
               }
               
-              // Send to Copilot SDK
-              await sessionData.session.send({ prompt: promptText });
+              // Handle image attachment: read file and convert to base64 for PI SDK
+              let images = null;
+              if (message.imagePath && existsSync(message.imagePath)) {
+                try {
+                  const imageBuffer = await readFile(message.imagePath);
+                  const ext = path.extname(message.imagePath).toLowerCase();
+                  const mediaType = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+                  const base64Data = imageBuffer.toString('base64');
+                  images = [{ type: 'image', source: { type: 'base64', mediaType, data: base64Data } }];
+                  console.log(`🖼️ Image attached: ${message.imagePath} (${mediaType}, ${Math.round(base64Data.length / 1024)}KB base64)`);
+                } catch (imgErr) {
+                  console.warn(`⚠️ Failed to read image: ${imgErr.message}`);
+                }
+              }
+              
+              // Route to selected agent engine
+              if (sessionData.agentEngine === 'pi-agent') {
+                console.log(`📤 Sending prompt to PI Agent (session: ${sessionId}, piSessionId: ${sessionData.piSessionId})...`);
+                try {
+                  const sendPromise = sendPiPrompt(sessionData.piSessionId || sessionId, promptText, images);
+                  const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('PI Agent request timed out after 120 seconds.')), 120000);
+                  });
+                  await Promise.race([sendPromise, timeoutPromise]);
+                  console.log(`✅ Prompt completed successfully for PI Agent (session: ${sessionId})`);
+                } catch (piErr) {
+                  console.error(`❌ PI Agent prompt failed (session: ${sessionId}):`, piErr.message);
+                  throw piErr;
+                }
+              } else {
+                // Send to Copilot SDK with timeout
+                if (!sessionData.sdkUsageReceived) {
+                  sessionData.totalInputTokens += estimateTokens(promptText);
+                }
+                console.log(`📤 Sending prompt to ${LLM_PROVIDER} provider (session: ${sessionId})...`);
+                const sendPromise = sessionData.session.send({ prompt: promptText });
+                const timeoutPromise = new Promise((_, reject) => {
+                  setTimeout(() => reject(new Error('LLM request timed out after 120 seconds. The provider may be unresponsive.')), 120000);
+                });
+                await Promise.race([sendPromise, timeoutPromise]);
+                console.log(`✅ Prompt sent successfully to ${LLM_PROVIDER} (session: ${sessionId})`);
+              }
             } catch (err) {
+              if (sessionData) {
+                sessionData._sending = false;
+                if (sessionData._sendingTimeout) { clearTimeout(sessionData._sendingTimeout); sessionData._sendingTimeout = null; }
+              }
               ws.send(JSON.stringify({
                 type: 'chat_error',
-                sessionId: message.sessionId,
+                sessionId: sessionId || message.sessionId,
                 message: err.message
               }));
             }
@@ -2988,7 +3675,11 @@ wss.on('connection', (ws) => {
             if (userSessions instanceof Map) {
               for (const [sessionId, sessionData] of userSessions) {
                 try {
-                  await sessionData.session.disconnect();
+                  if (sessionData.agentEngine === 'pi-agent') {
+                    await endPiSession(sessionData.piSessionId || sessionId);
+                  } else {
+                    await sessionData.session.disconnect();
+                  }
                 } catch (e) {}
                 closeChatSession(sessionData.sessionId);
               }
@@ -3011,9 +3702,22 @@ wss.on('connection', (ws) => {
             if (pending) {
               pendingPermissions.delete(requestId);
               if (approved) {
-                pending.resolve({ kind: 'approved' });
+                pending.resolve({ kind: 'approve-once' });
               } else {
-                pending.reject(new Error('Permission denied by user'));
+                pending.resolve({ kind: 'reject' });
+              }
+
+              // CRITICAL FIX: Broadcast permission_resolved to ALL user devices
+              // so other clients (desktop, mobile) can dismiss their stale permission UIs
+              for (const [ws, clientData] of clients) {
+                if (clientData.userId === pending.userId && ws.readyState === 1) {
+                  ws.send(JSON.stringify({
+                    type: 'permission_resolved',
+                    requestId,
+                    approved,
+                    resolvedBy: 'another_device'
+                  }));
+                }
               }
             } else {
               console.warn(`No pending permission request found: ${requestId}`);
@@ -3030,14 +3734,45 @@ wss.on('connection', (ws) => {
             if (pending) {
               pendingUserInputs.delete(requestId);
               pending.resolve(value || '');
+
+              // CRITICAL FIX: Broadcast user_input_resolved to ALL user devices
+              for (const [ws, clientData] of clients) {
+                if (clientData.userId === pending.userId && ws.readyState === 1) {
+                  ws.send(JSON.stringify({
+                    type: 'user_input_resolved',
+                    requestId,
+                    resolvedBy: 'another_device'
+                  }));
+                }
+              }
             } else {
               console.warn(`No pending user input request found: ${requestId}`);
             }
           })();
           break;
           
+        case 'extension_ui_response':
+          // Handle PI Agent extension UI responses (permission/user-input)
+          if (!clientData.authenticated) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
+            return;
+          }
+          (async () => {
+            const { requestId, sessionId, approved, value } = message;
+            try {
+              const userSessions = chatSessions.get(clientData.userId);
+              const sessionData = userSessions instanceof Map ? userSessions.get(sessionId) : null;
+              const piSid = sessionData?.piSessionId || sessionId;
+              await respondToPiExtensionUI(piSid, requestId, { approved, value });
+              ws.send(JSON.stringify({ type: 'extension_ui_resolved', requestId, approved }));
+            } catch (err) {
+              ws.send(JSON.stringify({ type: 'chat_error', message: err.message }));
+            }
+          })();
+          break;
+          
         case 'chat_command':
-          // Handle slash commands like /plan, /agent, /allow-all
+          // Handle slash commands for PI Agent
           if (!clientData.authenticated) {
             ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
             return;
@@ -3057,70 +3792,37 @@ wss.on('connection', (ws) => {
               sessionData = Array.from(userSessions.values())[0];
             }
             
-            if (!sessionData?.session) {
-              ws.send(JSON.stringify({ type: 'chat_error', message: 'No SDK session available' }));
+            if (!sessionData) {
+              ws.send(JSON.stringify({ type: 'chat_error', message: 'No active session' }));
               return;
             }
             
             try {
-              const sdkSession = sessionData.session;
               let result = { success: true };
               
               switch (command) {
-                case '/allow-all':
-                  // Enable all permissions automatically for this session
-                  sessionData.autoApprove = true;
-                  result.message = 'All permissions will be automatically approved';
-                  break;
-                  
-                case '/ask-permissions':
-                  // Ask for permission for each action
-                  sessionData.autoApprove = false;
-                  result.message = 'Permissions will be requested before each action';
-                  break;
-                  
-                case '/plan':
-                  // Enter plan mode - the agent creates a plan before executing
-                  sessionData.currentMode = 'plan';
-                  result.message = 'Entered plan mode. The agent will create a plan before executing.';
-                  result.mode = 'plan';
-                  break;
-                  
-                case '/interactive':
-                  // Exit plan mode, return to interactive mode
-                  sessionData.currentMode = 'interactive';
-                  result.message = 'Returned to interactive mode';
-                  result.mode = 'interactive';
-                  break;
-                  
-                case '/autopilot':
-                  // Enter autopilot mode - agent continues autonomously
-                  sessionData.currentMode = 'autopilot';
-                  result.message = 'Entered autopilot mode. The agent will continue working autonomously.';
-                  result.mode = 'autopilot';
-                  break;
-                  
                 case '/interrupt':
                 case '/stop':
-                  // Interrupt current operation
-                  try {
-                    await sdkSession.interrupt();
-                    result.message = 'Operation interrupted';
-                  } catch (e) {
-                    result.message = `Interrupt failed: ${e.message}`;
+                  if (sessionData.agentEngine === 'pi-agent') {
+                    abortPiSession(sessionData.piSessionId || sessionId);
+                    result.message = 'PI Agent operation interrupted';
+                  } else {
+                    result.message = 'No session available to interrupt';
                     result.success = false;
                   }
                   break;
                   
-                case '/resume':
-                  // Get session info for resuming later
-                  result.message = `Session ID: ${sessionData.sdkSessionId}`;
-                  result.sessionId = sessionData.sdkSessionId;
+                case '/clear':
+                  sessionData.history = [];
+                  if (sessionData.sessionId) {
+                    clearChatMessages(sessionData.sessionId);
+                  }
+                  result.message = 'Chat history cleared';
                   break;
                   
                 default:
                   result.success = false;
-                  result.message = `Unknown command: ${command}. Available commands: /allow-all, /ask-permissions, /plan, /interactive, /autopilot, /interrupt, /resume`;
+                  result.message = `Unknown command: ${command}. Available commands: /interrupt, /stop, /clear`;
               }
               
               ws.send(JSON.stringify({
@@ -3153,13 +3855,23 @@ wss.on('connection', (ws) => {
             }
             
             const sessionData = Array.from(userSessions.values())[0];
-            if (sessionData?.session) {
-              try {
+            if (!sessionData) {
+              ws.send(JSON.stringify({ type: 'chat_error', message: 'No active session' }));
+              return;
+            }
+            
+            try {
+              if (sessionData.agentEngine === 'pi-agent') {
+                abortPiSession(sessionData.piSessionId || sessionData.clientSessionId);
+                ws.send(JSON.stringify({ type: 'interrupt_success' }));
+              } else if (sessionData?.session) {
                 await sessionData.session.interrupt();
                 ws.send(JSON.stringify({ type: 'interrupt_success' }));
-              } catch (err) {
-                ws.send(JSON.stringify({ type: 'chat_error', message: err.message }));
+              } else {
+                ws.send(JSON.stringify({ type: 'chat_error', message: 'Session not interruptible' }));
               }
+            } catch (err) {
+              ws.send(JSON.stringify({ type: 'chat_error', message: err.message }));
             }
           })();
           break;
@@ -3184,7 +3896,8 @@ wss.on('connection', (ws) => {
               hasSession: true,
               sdkSessionId: sessionData?.sdkSessionId,
               dbSessionId: sessionData?.sessionId,
-              model: sessionData?.model || 'llama3.2',
+              agentEngine: sessionData?.agentEngine || 'copilot-sdk',
+              model: sessionData?.model || (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct'),
               mode: sessionData?.currentMode || 'interactive',
               historyLength: sessionData?.history?.length || 0
             }));
@@ -3236,13 +3949,13 @@ wss.on('connection', (ws) => {
     console.log('Client disconnected');
     const clientData = clients.get(ws);
     
-    // Mark terminals for this user as disconnected (keep them alive for grace period)
+    // Mark terminals OWNED BY THIS WEBSOCKET as disconnected (keep them alive indefinitely)
     if (clientData?.userId) {
       for (const [key, t] of terminals) {
-        if (t.userId === clientData.userId) {
+        if (t.userId === clientData.userId && t.ws === ws) {
           t.ws = null; // Mark as disconnected
           t.disconnectedAt = Date.now();
-          console.log(`Terminal ${t.terminalId} marked for cleanup (user ${clientData.userId})`);
+          console.log(`Terminal ${t.terminalId} disconnected (user ${clientData.userId}) — will persist until user closes it`);
         }
       }
     }
@@ -3255,8 +3968,11 @@ wss.on('connection', (ws) => {
   });
 });
 
+// Normalize HOST to avoid IPv6 binding issues on Windows when 'localhost' resolves to ::1
+const BIND_HOST = (HOST === 'localhost' || HOST === '127.0.0.1') ? '127.0.0.1' : HOST;
+
 // Start server
-server.listen(PORT, HOST, () => {
+server.listen(PORT, BIND_HOST, () => {
   console.log('╔════════════════════════════════════════════╗');
   console.log('║      Terminal Web UI Server Started        ║');
   console.log('╠════════════════════════════════════════════╣');
@@ -3265,31 +3981,36 @@ server.listen(PORT, HOST, () => {
   console.log(`║  Workspace: ${WORKSPACE_DIR}`);
   console.log('║  Auth: Required (see default credentials)  ║');
   console.log('╚════════════════════════════════════════════╝');
+
+  // Auto-start TTS if enabled
+  if (TTS_ENABLED) {
+    setTimeout(() => {
+      startTtsWorker();
+    }, 2000);
+  }
 });
 
-// Cleanup orphaned terminals and chat sessions periodically
+// Cleanup orphaned chat sessions and old TTS files periodically.
+// NOTE: Terminals are NEVER auto-killed. They persist until:
+//   1. The user explicitly clicks "Close Terminal" (close_terminal WS message)
+//   2. The shell process exits naturally (ptyProcess.onExit)
+//   3. The server shuts down (SIGTERM / SIGINT)
+//   4. The user explicitly logs out (logout WS message)
 setInterval(() => {
   const now = Date.now();
   
-  // Cleanup terminals
-  for (const [key, t] of terminals) {
-    if (t.ws === null && t.disconnectedAt) {
-      if (now - t.disconnectedAt > TERM_GRACE_PERIOD) {
-        console.log(`Cleaning up orphaned terminal ${key}`);
-        try { t.pty.kill(); } catch (e) {}
-        terminals.delete(key);
-      }
-    }
-  }
-  
-  // Cleanup chat sessions
+  // Cleanup chat sessions (keep idle ones longer but still purge eventually)
   for (const [userId, userSessions] of chatSessions) {
     let hasActive = false;
     for (const [sessionId, chatData] of userSessions) {
       if (now - chatData.lastActivity > CHAT_GRACE_PERIOD) {
         console.log(`Cleaning up expired chat session ${sessionId} for user ${userId}`);
         try {
-          chatData.session.disconnect();
+          if (chatData.agentEngine === 'pi-agent') {
+            endPiSession(chatData.piSessionId || sessionId);
+          } else if (chatData.session) {
+            chatData.session.disconnect();
+          }
         } catch (e) {}
         userSessions.delete(sessionId);
       } else {
@@ -3300,6 +4021,27 @@ setInterval(() => {
       chatSessions.delete(userId);
     }
   }
+
+  // Cleanup old TTS audio files
+  (async () => {
+    try {
+      const ttsDir = pathJoin(__dirname, 'tts');
+      if (existsSync(ttsDir)) {
+        const entries = await readdir(ttsDir);
+        let deleted = 0;
+        for (const entry of entries) {
+          const filePath = pathJoin(ttsDir, entry);
+          const stats = await stat(filePath);
+          if (now - stats.mtimeMs > TTS_FILE_AGE_MS) {
+            try { await unlink(filePath); deleted++; } catch (e) {}
+          }
+        }
+        if (deleted > 0) console.log(`Cleaned up ${deleted} old TTS audio files`);
+      }
+    } catch (e) {
+      // silently ignore cleanup errors
+    }
+  })();
 }, 60000); // Run every minute
 
 // Graceful shutdown
@@ -3316,7 +4058,11 @@ process.on('SIGTERM', async () => {
   for (const [userId, userSessions] of chatSessions) {
     for (const [sessionId, chatData] of userSessions) {
       try {
-        await chatData.session.disconnect();
+        if (chatData.agentEngine === 'pi-agent') {
+          await endPiSession(chatData.piSessionId || sessionId);
+        } else {
+          await chatData.session.disconnect();
+        }
       } catch (e) {}
     }
   }

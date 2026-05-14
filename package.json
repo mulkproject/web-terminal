@@ -13,7 +13,6 @@
     "cli": "node launcher-cli.js",
     "cli:interactive": "node launcher-cli.js interactive",
     "cli:status": "node launcher-cli.js status",
-    "tui": "node launcher-tui.js",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 stop terminal-web-ui",
     "pm2:restart": "pm2 restart terminal-web-ui",
@@ -69,6 +68,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
     "@github/copilot-sdk": "^0.3.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.8.1",
