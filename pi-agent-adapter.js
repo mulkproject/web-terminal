@@ -7,14 +7,35 @@
 import { createRequire } from 'module';
 import { existsSync, mkdirSync } from 'fs';
 import { platform } from 'os';
+import { execSync } from 'child_process';
 
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.cwd();
 const PI_SESSION_DIR = process.env.PI_SESSION_DIR || (WORKSPACE_DIR + (platform() === 'win32' ? '\\' : '/') + 'pi-agent-sessions');
 
 // ── Dynamic SDK import: local first, then global fallback ──────────
 let PiSdk = null;
+
+function getNpmGlobalPath() {
+  try {
+    const globalRoot = execSync('npm root -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    if (globalRoot && existsSync(globalRoot)) {
+      return globalRoot;
+    }
+  } catch (e) {
+    // npm not available or command failed
+  }
+  // Platform-specific fallback guesses
+  if (platform() === 'win32') {
+    const appData = process.env.APPDATA || (process.env.USERPROFILE + '\\AppData\\Roaming');
+    return appData + '\\npm\\node_modules';
+  }
+  return '/usr/local/lib/node_modules';
+}
+
 async function resolveSdk() {
   if (PiSdk) return PiSdk;
+
+  // 1. Try local node_modules (standard Node.js resolution)
   try {
     PiSdk = await import('@earendil-works/pi-coding-agent');
     log('✅ Loaded PI SDK from local node_modules');
@@ -22,9 +43,27 @@ async function resolveSdk() {
   } catch (e) {
     log('⚠️ Local SDK not found, trying global path...');
   }
+
+  // 2. Try global npm install via detected path
+  const globalRoot = getNpmGlobalPath();
   const globalPaths = [
-    'file:///C:/Users/master/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/dist/index.js',
+    `file://${globalRoot}/@earendil-works/pi-coding-agent/dist/index.js`,
   ];
+
+  // 3. Also try createRequire-based resolution from global root
+  try {
+    const requireFromGlobal = createRequire(globalRoot + '/package.json');
+    const resolved = requireFromGlobal.resolve('@earendil-works/pi-coding-agent');
+    if (resolved) {
+      PiSdk = await import(resolved);
+      log('✅ Loaded PI SDK from global install (createRequire)');
+      return PiSdk;
+    }
+  } catch (e) {
+    log('⚠️ createRequire global resolution failed:', e.message);
+  }
+
+  // 4. Direct file URL attempts
   for (const globalPath of globalPaths) {
     try {
       PiSdk = await import(globalPath);
@@ -34,11 +73,12 @@ async function resolveSdk() {
       log('⚠️ Global path failed:', globalPath, e2.message);
     }
   }
+
   throw new Error(
     'PI SDK not available. Install with:\n' +
-    '  npm install @earendil-works/pi-coding-agent   (local)\n' +
-    '  npm install -g @earendil-works/pi-coding-agent  (global)\n' +
-    'Also ensure the global package exists at: C:/Users/master/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent'
+    '  npm install @earendil-works/pi-coding-agent       (local)\n' +
+    '  npm install -g @earendil-works/pi-coding-agent    (global)\n' +
+    `Detected global path: ${globalRoot}`
   );
 }
 
