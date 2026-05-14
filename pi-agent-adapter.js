@@ -571,8 +571,20 @@ export async function sendPiPrompt(clientSessionId, promptText, images = null) {
 // ── abortPiSession ─────────────────────────────────────────────────
 export async function abortPiSession(clientSessionId) {
   const entry = piSessions.get(clientSessionId);
-  if (entry?.session?.abort) {
-    try { await entry.session.abort(); } catch (e) { /* ignore */ }
+  if (entry?.session) {
+    // Kill running bash/compaction/summary FIRST so the agent becomes idle faster
+    if (typeof entry.session.abortBash === 'function') {
+      try { entry.session.abortBash(); } catch (e) { /* ignore */ }
+    }
+    if (typeof entry.session.abortCompaction === 'function') {
+      try { entry.session.abortCompaction(); } catch (e) { /* ignore */ }
+    }
+    if (typeof entry.session.abortBranchSummary === 'function') {
+      try { entry.session.abortBranchSummary(); } catch (e) { /* ignore */ }
+    }
+    if (typeof entry.session.abort === 'function') {
+      try { await entry.session.abort(); } catch (e) { /* ignore */ }
+    }
   }
   if (entry) {
     entry._sending = false;
@@ -600,6 +612,11 @@ export function getPiState(clientSessionId) {
     sessionId: entry.piSessionId,
     messages: entry.session?.messages || [],
   };
+}
+
+// ── getPiSession ────────────────────────────────────────────────────
+export function getPiSession(clientSessionId) {
+  return piSessions.get(clientSessionId) || null;
 }
 
 // ── getPiSessionFile ────────────────────────────────────────────────
