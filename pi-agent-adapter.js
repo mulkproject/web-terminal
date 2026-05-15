@@ -322,10 +322,13 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
   // Detect NVIDIA NIM: server.js passes provider='openai' for NVIDIA too,
   // so we detect by baseUrl containing nvidia.com
   const isNvidia = config.provider === 'nvidia' || (config.baseUrl && config.baseUrl.includes('nvidia.com'));
+  const isOllama = config.provider === 'ollama';
 
   // The SDK's hasConfiguredAuth() checks providerRequestConfigs, not authStorage.
   // Register the provider explicitly so auth validation passes for our custom model objects.
-  const providerName = isNvidia ? 'nvidia' : (config.provider || 'ollama');
+  // For Ollama, use 'openai' as provider to avoid SDK's internal Ollama-specific validation
+  // which may try to hit /v1/models endpoint that doesn't exist in Ollama's OpenAI-compatible API
+  const providerName = isNvidia ? 'nvidia' : (isOllama ? 'openai' : (config.provider || 'ollama'));
   const apiKey = config.apiKey || 'ollama';
   try {
     modelRegistry.registerProvider(providerName, { apiKey });
@@ -380,7 +383,9 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
       sdkModel.name = normalizedModel;
       sdkModel.baseUrl = config.baseUrl;
       sdkModel.api = 'openai-completions';
-      sdkModel.provider = 'ollama';
+      // Use 'openai' as provider to avoid SDK's internal Ollama-specific validation
+      // which may try to hit /v1/models (not available in Ollama's OpenAI-compatible API)
+      sdkModel.provider = 'openai';
       sdkModel._isOllamaCustom = true; // Mark as custom Ollama model
       
       log('🔧 Created Ollama model config:', sdkModel.id, 'provider:', sdkModel.provider, 'baseUrl:', sdkModel.baseUrl);
