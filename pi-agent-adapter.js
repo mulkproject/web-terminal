@@ -92,6 +92,20 @@ function log(...args) {
 // ── buildProviderConfig ─────────────────────────────────────────────
 function buildProviderConfig() {
   const provider = process.env.LLM_PROVIDER || 'ollama';
+  
+  // OpenCode Zen — AI gateway with multiple model providers
+  if (provider === 'opencode-zen') {
+    const model = process.env.OPENCODE_ZEN_MODEL || 'deepseek-v4-flash-free';
+    // OpenCode Zen uses OpenAI-compatible API by default
+    return {
+      provider: 'opencode-zen',
+      baseUrl: 'https://opencode.ai/zen/v1',
+      apiKey: process.env.OPENCODE_ZEN_API_KEY || '',
+      model: model,
+      noBuiltinTools: false
+    };
+  }
+  
   if (provider === 'nvidia') {
     return {
       provider: 'nvidia',
@@ -177,6 +191,43 @@ async function validateOllamaModel(modelName, ollamaHost) {
     `To use this model, pull it first:\n` +
     `  ollama pull ${modelName}:latest`
   );
+}
+
+// ── fetchAvailableZenModels ──────────────────────────────────────
+// Fetches the list of available models from OpenCode Zen
+async function fetchAvailableZenModels(apiKey) {
+  try {
+    const response = await fetch('https://opencode.ai/zen/v1/models', {
+      headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}
+    });
+    if (!response.ok) {
+      throw new Error(`OpenCode Zen API returned ${response.status}: ${response.statusText}`);
+    }
+    const data = await response.json();
+    // Returns array of model objects with id, name, etc.
+    return data.data || data.models || [];
+  } catch (err) {
+    log('⚠️ Failed to fetch OpenCode Zen models:', err.message);
+    return null;
+  }
+}
+
+// ── getOpenCodeZenFallbackModels ───────────────────────────────────
+// Returns a fallback list of known OpenCode Zen free and popular models
+function getOpenCodeZenFallbackModels() {
+  return [
+    { id: 'deepseek-v4-flash-free', name: 'DeepSeek V4 Flash Free', type: 'opencode-zen', free: true },
+    { id: 'minimax-m2.5-free', name: 'MiniMax M2.5 Free', type: 'opencode-zen', free: true },
+    { id: 'ring-2.6-1t-free', name: 'Ring 2.6 1T Free', type: 'opencode-zen', free: true },
+    { id: 'nemotron-3-super-free', name: 'Nemotron 3 Super Free', type: 'opencode-zen', free: true },
+    { id: 'big-pickle', name: 'Big Pickle (Free)', type: 'opencode-zen', free: true },
+    { id: 'gpt-5.4', name: 'GPT 5.4', type: 'opencode-zen', free: false },
+    { id: 'gpt-5.5', name: 'GPT 5.5', type: 'opencode-zen', free: false },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', type: 'opencode-zen', free: false },
+    { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', type: 'opencode-zen', free: false },
+    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', type: 'opencode-zen', free: false },
+    { id: 'gemini-3-flash', name: 'Gemini 3 Flash', type: 'opencode-zen', free: false },
+  ];
 }
 
 // ── Event translation: SDK event → websocket-compatible payload ──
@@ -323,12 +374,18 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
   // so we detect by baseUrl containing nvidia.com
   const isNvidia = config.provider === 'nvidia' || (config.baseUrl && config.baseUrl.includes('nvidia.com'));
   const isOllama = config.provider === 'ollama';
+  const isOpenCodeZen = config.provider === 'opencode-zen';
 
   // The SDK's hasConfiguredAuth() checks providerRequestConfigs, not authStorage.
   // Register the provider explicitly so auth validation passes for our custom model objects.
   // For Ollama, use 'openai' as provider to avoid SDK's internal Ollama-specific validation
   // which may try to hit /v1/models endpoint that doesn't exist in Ollama's OpenAI-compatible API
-  const providerName = isNvidia ? 'nvidia' : (isOllama ? 'openai' : (config.provider || 'ollama'));
+  // For OpenCode Zen, also use 'openai' since it's OpenAI-compatible
+  let providerName;
+  if (isNvidia) providerName = 'nvidia';
+  else if (isOllama || isOpenCodeZen) providerName = 'openai';
+  else providerName = config.provider || 'ollama';
+  
   const apiKey = config.apiKey || 'ollama';
   try {
     modelRegistry.registerProvider(providerName, { apiKey });
@@ -389,6 +446,28 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
       sdkModel._isOllamaCustom = true; // Mark as custom Ollama model
       
       log('🔧 Created Ollama model config:', sdkModel.id, 'provider:', sdkModel.provider, 'baseUrl:', sdkModel.baseUrl);
+    } else if (isOpenCodeZen) {
+      // For OpenCode Zen, create a custom OpenAI-compatible model
+      const zenModel = sanitizedModel || config.model || 'deepseek-v4-flash-free';
+      log('🔧 Using OpenCode Zen model:', zenModel);
+      
+      // Find an OpenAI template to base our model on
+      const template = modelRegistry.getAvailable().find(m => m.provider === 'openai') || modelRegistry.getAvailable()[0];
+      
+      if (!template) {
+        throw new Error('No available template models found. The SDK could not load any models from its registry. Check installation.');
+      }
+      
+      // Create a copy for OpenCode Zen
+      sdkModel = { ...template };
+      sdkModel.id = zenModel;
+      sdkModel.name = zenModel;
+      sdkModel.baseUrl = config.baseUrl; // https://opencode.ai/zen/v1
+      sdkModel.api = 'openai-completions';
+      sdkModel.provider = 'openai'; // OpenCode Zen is OpenAI-compatible
+      sdkModel._isOpenCodeZen = true; // Mark as OpenCode Zen model
+      
+      log('🔧 Created OpenCode Zen model config:', sdkModel.id, 'provider:', sdkModel.provider, 'baseUrl:', sdkModel.baseUrl);
     } else {
       // For NVIDIA and other providers, use the registry template approach
       const template = modelRegistry.find(config.provider, sanitizedModel)
@@ -683,4 +762,4 @@ export function respondToPiExtensionUI(clientSessionId, requestId, responsePaylo
   log(`🔌 Extension UI response not yet wired for SDK mode: ${clientSessionId}`);
 }
 
-export { buildProviderConfig, fetchAvailableOllamaModels, validateOllamaModel };
+export { buildProviderConfig, fetchAvailableOllamaModels, validateOllamaModel, fetchAvailableZenModels, getOpenCodeZenFallbackModels };

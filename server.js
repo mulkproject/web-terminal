@@ -99,8 +99,8 @@ const HOST = process.env.HOST || 'localhost';
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.cwd();
 const CHAT_ENABLED = process.env.CHAT_ENABLED !== 'false';
 const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'ollama').toLowerCase();
-if (!['ollama', 'nvidia'].includes(LLM_PROVIDER)) {
-  console.warn(`⚠️  Unsupported LLM provider "${LLM_PROVIDER}" — only "ollama" and "nvidia" are supported. Defaulting to "ollama".`);
+if (!['ollama', 'nvidia', 'opencode-zen'].includes(LLM_PROVIDER)) {
+  console.warn(`⚠️  Unsupported LLM provider "${LLM_PROVIDER}" — only "ollama", "nvidia", and "opencode-zen" are supported. Defaulting to "ollama".`);
 }
 
 /**
@@ -118,6 +118,16 @@ function buildPiProviderConfig(provider = null) {
       apiKey: process.env.NVIDIA_API_KEY,
       // NVIDIA NIM free-tier rejects the `tools` field → disable built-in tools
       noBuiltinTools: true
+    };
+  }
+  if (effectiveProvider === 'opencode-zen' && process.env.OPENCODE_ZEN_API_KEY) {
+    const model = process.env.OPENCODE_ZEN_MODEL || 'deepseek-v4-flash-free';
+    return {
+      provider: 'opencode-zen',
+      baseUrl: 'https://opencode.ai/zen/v1',
+      apiKey: process.env.OPENCODE_ZEN_API_KEY,
+      model: model,
+      noBuiltinTools: false
     };
   }
   if (effectiveProvider === 'ollama' && process.env.OLLAMA_HOST) {
@@ -751,6 +761,109 @@ function getNvidiaFallbackModels() {
   return NVIDIA_FALLBACK_MODELS;
 }
 
+// OpenCode Zen model helpers
+// Free and paid models from OpenCode Zen gateway
+// Docs: https://opencode.ai/docs/zen/
+const OPENCODE_ZEN_FALLBACK_MODELS = [
+  // Free tier models
+  { id: 'deepseek-v4-flash-free', name: 'DeepSeek V4 Flash (Free)', type: 'opencode-zen', free: true },
+  { id: 'minimax-m2.5-free', name: 'MiniMax M2.5 (Free)', type: 'opencode-zen', free: true },
+  { id: 'ring-2.6-1t-free', name: 'Ring 2.6 1T (Free)', type: 'opencode-zen', free: true },
+  { id: 'nemotron-3-super-free', name: 'Nemotron 3 Super (Free)', type: 'opencode-zen', free: true },
+  { id: 'big-pickle', name: 'Big Pickle (Free)', type: 'opencode-zen', free: true },
+  // GPT models
+  { id: 'gpt-5.5', name: 'GPT 5.5', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.5-pro', name: 'GPT 5.5 Pro', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.4', name: 'GPT 5.4', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.4-pro', name: 'GPT 5.4 Pro', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.4-mini', name: 'GPT 5.4 Mini', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.4-nano', name: 'GPT 5.4 Nano', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.3-codex', name: 'GPT 5.3 Codex', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.3-codex-spark', name: 'GPT 5.3 Codex Spark', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.2', name: 'GPT 5.2', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.2-codex', name: 'GPT 5.2 Codex', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.1', name: 'GPT 5.1', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.1-codex', name: 'GPT 5.1 Codex', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.1-codex-max', name: 'GPT 5.1 Codex Max', type: 'opencode-zen', free: false },
+  { id: 'gpt-5.1-codex-mini', name: 'GPT 5.1 Codex Mini', type: 'opencode-zen', free: false },
+  { id: 'gpt-5', name: 'GPT 5', type: 'opencode-zen', free: false },
+  { id: 'gpt-5-codex', name: 'GPT 5 Codex', type: 'opencode-zen', free: false },
+  { id: 'gpt-5-nano', name: 'GPT 5 Nano', type: 'opencode-zen', free: false },
+  // Claude models
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', type: 'opencode-zen', free: false },
+  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', type: 'opencode-zen', free: false },
+  { id: 'claude-opus-4-5', name: 'Claude Opus 4.5', type: 'opencode-zen', free: false },
+  { id: 'claude-opus-4-1', name: 'Claude Opus 4.1', type: 'opencode-zen', free: false },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', type: 'opencode-zen', free: false },
+  { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', type: 'opencode-zen', free: false },
+  { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', type: 'opencode-zen', free: false },
+  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', type: 'opencode-zen', free: false },
+  { id: 'claude-3-5-haiku', name: 'Claude Haiku 3.5', type: 'opencode-zen', free: false },
+  // Gemini models
+  { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', type: 'opencode-zen', free: false },
+  { id: 'gemini-3-flash', name: 'Gemini 3 Flash', type: 'opencode-zen', free: false },
+  // Chinese LLMs
+  { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus', type: 'opencode-zen', free: false },
+  { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus', type: 'opencode-zen', free: false },
+  { id: 'minimax-m2.7', name: 'MiniMax M2.7', type: 'opencode-zen', free: false },
+  { id: 'minimax-m2.5', name: 'MiniMax M2.5', type: 'opencode-zen', free: false },
+  { id: 'glm-5.1', name: 'GLM 5.1', type: 'opencode-zen', free: false },
+  { id: 'glm-5', name: 'GLM 5', type: 'opencode-zen', free: false },
+  { id: 'kimi-k2.5', name: 'Kimi K2.5', type: 'opencode-zen', free: false },
+  { id: 'kimi-k2.6', name: 'Kimi K2.6', type: 'opencode-zen', free: false },
+];
+
+function getOpenCodeZenFallbackModels() {
+  return OPENCODE_ZEN_FALLBACK_MODELS;
+}
+
+// Cache for OpenCode Zen available models (refreshed every 30 min)
+let _zenModelsCache = null;
+let _zenModelsCacheTime = 0;
+const ZEN_MODELS_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+async function getAvailableZenModels() {
+  if (_zenModelsCache && (Date.now() - _zenModelsCacheTime) < ZEN_MODELS_CACHE_TTL) {
+    return _zenModelsCache;
+  }
+  try {
+    const apiKey = process.env.OPENCODE_ZEN_API_KEY;
+    if (!apiKey) return getOpenCodeZenFallbackModels();
+    const response = await fetch('https://opencode.ai/zen/v1/models', {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    });
+    if (response.ok) {
+      const data = await response.json();
+      const allModels = data.data || data.models || [];
+      _zenModelsCache = allModels.map(m => ({ 
+        id: m.id || m.model || m.name, 
+        name: m.name || m.id || m.model,
+        type: 'opencode-zen',
+        free: m.free || false
+      }));
+      _zenModelsCacheTime = Date.now();
+      console.log(`📋 OpenCode Zen API returned ${allModels.length} models`);
+      return _zenModelsCache;
+    } else {
+      console.warn(`⚠️ OpenCode Zen API returned ${response.status}: ${response.statusText}`);
+    }
+  } catch (err) {
+    console.error('Failed to fetch OpenCode Zen models:', err.message);
+  }
+  // On error or empty API, return the static fallback list
+  return getOpenCodeZenFallbackModels();
+}
+
+async function validateOpenCodeZenModel(model) {
+  const availableModels = await getAvailableZenModels();
+  if (availableModels.length === 0) {
+    // If we can't reach Zen API, fallback to static list
+    return getOpenCodeZenFallbackModels().some(m => m.id === model || m.name === model);
+  }
+  const modelIds = availableModels.map(m => m.id || m.name);
+  return modelIds.includes(model);
+}
+
 
 // Cache for NVIDIA available models (refreshed every 30 min)
 let _nvidiaModelsCache = null;
@@ -802,6 +915,11 @@ async function validateModelForProvider(model) {
   if (!model) return false;
   if (LLM_PROVIDER === 'nvidia') {
     return await validateNvidiaModel(model);
+  }
+  if (LLM_PROVIDER === 'opencode-zen') {
+    // For OpenCode Zen, check against known free/paid models or accept any non-empty string
+    const knownModels = getOpenCodeZenFallbackModels().map(m => m.id);
+    return knownModels.includes(model) || (model && model.length > 0 && !model.includes('//'));
   }
   if (LLM_PROVIDER === 'ollama') {
     // For Ollama, just check the model name looks reasonable (non-empty, no obvious invalid chars)
@@ -1342,9 +1460,39 @@ app.get('/api/chat/status', requireAuth, async (req, res) => {
       });
       if (modelsList.length > 0) defaultModel = modelsList[0].id;
     }
+  } else if (LLM_PROVIDER === 'opencode-zen' && process.env.OPENCODE_ZEN_API_KEY) {
+    try {
+      let zenModels = await getAvailableZenModels();
+      if (zenModels.length === 0) {
+        zenModels = getOpenCodeZenFallbackModels();
+        console.log('📋 Using OpenCode Zen fallback model list for status');
+      }
+      modelsList = zenModels.map(m => ({
+        id: m.id || m.name,
+        name: m.name || m.id,
+        free: m.free || false
+      }));
+      if (modelsList.length > 0) defaultModel = modelsList[0].id;
+      copilotAuthenticated = true;
+    } catch (err) {
+      console.error('Failed to get OpenCode Zen models for status:', err.message);
+      // Use fallback on error
+      const fallback = getOpenCodeZenFallbackModels();
+      modelsList = fallback.map(m => ({
+        id: m.id,
+        name: m.name,
+        free: m.free
+      }));
+      if (modelsList.length > 0) defaultModel = modelsList[0].id;
+    }
   } else if (LLM_PROVIDER === 'nvidia' && !process.env.NVIDIA_API_KEY) {
     // NVIDIA selected but no API key configured
     console.warn('⚠️ NVIDIA provider selected but NVIDIA_API_KEY not set');
+    modelsList = [];
+    copilotAuthenticated = false;
+  } else if (LLM_PROVIDER === 'opencode-zen' && !process.env.OPENCODE_ZEN_API_KEY) {
+    // OpenCode Zen selected but no API key configured
+    console.warn('⚠️ OpenCode Zen provider selected but OPENCODE_ZEN_API_KEY not set');
     modelsList = [];
     copilotAuthenticated = false;
   } else {
@@ -1357,6 +1505,7 @@ app.get('/api/chat/status', requireAuth, async (req, res) => {
   // Fallback to hardcoded default
   if (!defaultModel) {
     defaultModel = LLM_PROVIDER === 'ollama' ? 'llama3.2' :
+                   LLM_PROVIDER === 'opencode-zen' ? 'deepseek-v4-flash-free' :
                    'meta/llama-3.1-8b-instruct';
   }
   
@@ -1379,18 +1528,19 @@ app.get('/api/chat/status', requireAuth, async (req, res) => {
     copilotUser,
     hasSession,
     messageCount: firstSession?.history?.length || 0,
-    ollamaConfigured: LLM_PROVIDER === 'ollama' && !!process.env.OLLAMA_HOST,
-    ollamaHost: process.env.OLLAMA_HOST,
-    ollamaModel: LLM_PROVIDER === 'ollama' ? defaultModel : null,
     llmProvider: LLM_PROVIDER,
     availableProviders: [
       ...(process.env.OLLAMA_HOST ? [{ id: 'ollama', name: 'Ollama' }] : []),
-      ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : [])
+      ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : []),
+      ...(process.env.OPENCODE_ZEN_API_KEY ? [{ id: 'opencode-zen', name: 'OpenCode Zen' }] : [])
     ],
     ollamaConfigured: !!process.env.OLLAMA_HOST,
     nvidiaConfigured: !!process.env.NVIDIA_API_KEY,
+    zenConfigured: !!process.env.OPENCODE_ZEN_API_KEY,
+    ollamaHost: process.env.OLLAMA_HOST,
     ollamaModel: LLM_PROVIDER === 'ollama' ? defaultModel : null,
     nvidiaModel: LLM_PROVIDER === 'nvidia' ? defaultModel : null,
+    zenModel: LLM_PROVIDER === 'opencode-zen' ? defaultModel : null,
     availableModels: modelsList
   });
 });
@@ -1430,6 +1580,20 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
           type: 'nvidia'
         }));
       }
+    } else if (requestedProvider === 'opencode-zen' && process.env.OPENCODE_ZEN_API_KEY) {
+      let zenModels = await getAvailableZenModels();
+      if (zenModels.length === 0) {
+        zenModels = getOpenCodeZenFallbackModels();
+        console.log('📋 Using OpenCode Zen fallback model list for /api/chat/models');
+      }
+      if (zenModels.length > 0) {
+        models = zenModels.map(m => ({
+          id: m.id || m.name,
+          name: m.name || m.id,
+          type: 'opencode-zen',
+          free: m.free || false
+        }));
+      }
     } else {
       console.warn(`⚠️  Provider "${requestedProvider}" is not configured or unsupported.`);
     }
@@ -1446,6 +1610,13 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
         id: m.id || m.name,
         name: getNvidiaModelDisplayName(m.id || m.name),
         type: 'nvidia'
+      }));
+    } else if (requestedProvider === 'opencode-zen') {
+      fallbackModels = getOpenCodeZenFallbackModels().map(m => ({
+        id: m.id,
+        name: m.name,
+        type: 'opencode-zen',
+        free: m.free
       }));
     }
 
@@ -1471,6 +1642,7 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
         type: requestedProvider,
         url: requestedProvider === 'ollama' ? (process.env.OLLAMA_HOST || 'http://localhost:11434') :
              requestedProvider === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' :
+             requestedProvider === 'opencode-zen' ? 'https://opencode.ai/zen/v1' :
              'GitHub Copilot Cloud'
       }
     });
@@ -1488,10 +1660,12 @@ app.get('/api/chat/config', requireAuth, async (req, res) => {
       llmProvider: LLM_PROVIDER,
       availableProviders: [
         ...(process.env.OLLAMA_HOST ? [{ id: 'ollama', name: 'Ollama' }] : []),
-        ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : [])
+        ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : []),
+        ...(process.env.OPENCODE_ZEN_API_KEY ? [{ id: 'opencode-zen', name: 'OpenCode Zen' }] : [])
       ],
       ollamaConfigured: !!process.env.OLLAMA_HOST,
       nvidiaConfigured: !!process.env.NVIDIA_API_KEY,
+      zenConfigured: !!process.env.OPENCODE_ZEN_API_KEY,
       defaultProvider: LLM_PROVIDER
     });
   } catch (err) {
@@ -2955,10 +3129,10 @@ wss.on('connection', (ws) => {
               
               // Resolve provider: prefer client choice, then fall back to global
               const sessionProvider = (message.provider || LLM_PROVIDER).toLowerCase();
-              if (!['ollama', 'nvidia'].includes(sessionProvider)) {
+              if (!['ollama', 'nvidia', 'opencode-zen'].includes(sessionProvider)) {
                 ws.send(JSON.stringify({
                   type: 'chat_error',
-                  message: `Invalid provider "${sessionProvider}". Only "ollama" and "nvidia" are supported.`
+                  message: `Invalid provider "${sessionProvider}". Only "ollama", "nvidia", and "opencode-zen" are supported.`
                 }));
                 return;
               }
@@ -2976,6 +3150,13 @@ wss.on('connection', (ws) => {
                 }));
                 return;
               }
+              if (sessionProvider === 'opencode-zen' && !process.env.OPENCODE_ZEN_API_KEY) {
+                ws.send(JSON.stringify({
+                  type: 'chat_error',
+                  message: 'OpenCode Zen is not configured. Set OPENCODE_ZEN_API_KEY in your environment.'
+                }));
+                return;
+              }
 
               // Resolve model: prefer client choice, then first available model, then hardcoded fallback
               let availableModelList = [];
@@ -2983,6 +3164,8 @@ wss.on('connection', (ws) => {
                 availableModelList = await getAvailableOllamaModels();
               } else if (sessionProvider === 'nvidia') {
                 availableModelList = await getAvailableNvidiaModels();
+              } else if (sessionProvider === 'opencode-zen') {
+                availableModelList = await getAvailableZenModels();
                 if (availableModelList.length === 0) {
                   availableModelList = getNvidiaFallbackModels();
                 }
