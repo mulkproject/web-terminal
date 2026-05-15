@@ -973,9 +973,19 @@ function wirePiSessionEvents(piSession, ws, clientSessionId, clientData, serverS
           const delta = event.delta || payload?.delta || '';
           if (delta) {
             console.log(`[PI] thinking_delta text=${JSON.stringify(delta.slice(0,60))}`);
-            // Could send as a separate type, but for now append to stream
-            ws.send(JSON.stringify({ type: 'chat_stream_delta', sessionId: clientSessionId, delta }));
+            ws.send(JSON.stringify({ type: 'agent_thinking', sessionId: clientSessionId, delta }));
           }
+          break;
+        }
+        case 'agent_start':
+        case 'turn_start': {
+          console.log(`[PI] agent_start/turn_start session=${clientSessionId}`);
+          ws.send(JSON.stringify({ type: 'agent_status', sessionId: clientSessionId, status: 'working', message: 'Agent is thinking...' }));
+          break;
+        }
+        case 'agent_end':
+        case 'turn_end': {
+          console.log(`[PI] agent_end/turn_end session=${clientSessionId}`);
           break;
         }
         case 'message_update': {
@@ -1933,7 +1943,8 @@ app.post('/api/chat/send', requireAuth, async (req, res) => {
 
     // Send to agent engine
     if (chatData.agentEngine === 'pi-agent') {
-      const sendPromise = sendPiPrompt(chatData.piSessionId || targetSessionId, message);
+      // For REST API calls, use default streaming behavior (not follow-up)
+      const sendPromise = sendPiPrompt(chatData.piSessionId || targetSessionId, message, null, null);
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('PI Agent request timed out after 120 seconds.')), 120000);
       });
@@ -3999,30 +4010,6 @@ wss.on('connection', (ws) => {
                 }
               }
               
-              // Add user message to history
-              if (sessionData._sending) {
-                ws.send(JSON.stringify({
-                  type: 'chat_error',
-                  sessionId: sessionId,
-                  message: 'A response is already being generated. Please wait for it to complete before sending another message.'
-                }));
-                return;
-              }
-              sessionData._sending = true;
-              // Safety net: if _sending is still true after 90 seconds,
-              // reset it so the user isn't permanently blocked
-              sessionData._sendingTimeout = setTimeout(() => {
-                if (sessionData._sending) {
-                  console.warn(`⚠️ _sending flag stuck for session ${sessionId} — resetting after timeout`);
-                  sessionData._sending = false;
-                  ws.send(JSON.stringify({
-                    type: 'chat_error',
-                    sessionId: message.sessionId,
-                    message: 'Response timed out. Please try again.'
-                  }));
-                }
-              }, 90000);
-              
               sessionData.history.push({
                 role: 'user',
                 content: message.message,
@@ -4033,12 +4020,37 @@ wss.on('connection', (ws) => {
               // Persist user message to database
               addChatMessage(sessionData.sessionId, 'user', message.message);
               
-              // Send confirmation
+              // Send confirmation with queue status
+              const isQueued = sessionData._sending;
               ws.send(JSON.stringify({
                 type: 'chat_message_sent',
                 sessionId: sessionId,
-                message: message.message
+                message: message.message,
+                queued: isQueued,
+                status: isQueued ? 'queued' : 'sending'
               }));
+              
+              // Determine streaming behavior for PI Agent
+              // If agent is already working, queue as follow-up
+              const streamingBehavior = sessionData._sending ? 'followUp' : null;
+              
+              // Mark as sending (for UI state)
+              if (!sessionData._sending) {
+                sessionData._sending = true;
+                // Safety net: if _sending is still true after 90 seconds,
+                // reset it so the user isn't permanently blocked
+                sessionData._sendingTimeout = setTimeout(() => {
+                  if (sessionData._sending) {
+                    console.warn(`⚠️ _sending flag stuck for session ${sessionId} — resetting after timeout`);
+                    sessionData._sending = false;
+                    ws.send(JSON.stringify({
+                      type: 'chat_error',
+                      sessionId: message.sessionId,
+                      message: 'Response timed out. Please try again.'
+                    }));
+                  }
+                }, 90000);
+              }
               
               // Build prompt with working directory context if available
               let promptText = message.message;
@@ -4064,12 +4076,12 @@ wss.on('connection', (ws) => {
                   console.warn(`⚠️ Failed to read image: ${imgErr.message}`);
                 }
               }
-              
+
               // Route to selected agent engine
               if (sessionData.agentEngine === 'pi-agent') {
-                console.log(`📤 Sending prompt to PI Agent (session: ${sessionId}, piSessionId: ${sessionData.piSessionId})...`);
+                console.log(`📤 Sending prompt to PI Agent (session: ${sessionId}, piSessionId: ${sessionData.piSessionId}, behavior: ${streamingBehavior || 'default'})...`);
                 try {
-                  const sendPromise = sendPiPrompt(sessionData.piSessionId || sessionId, promptText, images);
+                  const sendPromise = sendPiPrompt(sessionData.piSessionId || sessionId, promptText, images, streamingBehavior);
                   const timeoutPromise = new Promise((_, reject) => {
                     setTimeout(() => reject(new Error('PI Agent request timed out after 120 seconds.')), 120000);
                   });

@@ -503,10 +503,16 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
     retry: { enabled: true, maxRetries: 2 },
   });
 
-  // Use a PERSISTENT session manager so conversation history survives
-  // reconnects, tab switches, and server restarts. The SDK saves messages
-  // to a .jsonl file under PI_SESSION_DIR.
-  const sessionManager = sdk.SessionManager.create(PI_SESSION_DIR);
+  // Create a unique session directory for this session to prevent
+  // session state files from colliding with other concurrent sessions.
+  // Each session gets its own subdirectory based on clientSessionId.
+  const sessionDir = PI_SESSION_DIR + (platform() === 'win32' ? '\\' : '/') + 'session-' + clientSessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (!existsSync(sessionDir)) {
+    try { mkdirSync(sessionDir, { recursive: true }); } catch (e) { log('⚠️ Failed to create session dir:', e.message); }
+  }
+
+  // Use a PERSISTENT session manager with unique directory for this session
+  const sessionManager = sdk.SessionManager.create(sessionDir);
 
   log('🔧 Creating PI agent session with model:', sdkModel?.id, 'provider:', sdkModel?.provider, 'baseUrl:', sdkModel?.baseUrl, 'cwd:', safeWorkingDirectory);
 
@@ -648,15 +654,30 @@ export async function restorePiSession(clientSessionId, sessionName, model, work
 }
 
 // ── sendPiPrompt ────────────────────────────────────────────────────
-export async function sendPiPrompt(clientSessionId, promptText, images = null) {
+// Queue of pending messages for each session (for message queuing when agent is busy)
+const messageQueues = new Map(); // clientSessionId -> Array<{promptText, images, resolve, reject}>
+const MAX_QUEUE_SIZE = 5; // Maximum number of messages to queue per session
+
+export async function sendPiPrompt(clientSessionId, promptText, images = null, streamingBehavior = null) {
   const entry = piSessions.get(clientSessionId);
   if (!entry) throw new Error('PI session not found: ' + clientSessionId);
-  if (entry._sending) throw new Error('A response is already being generated');
 
   log(`🚀 sendPiPrompt called for ${clientSessionId}: "${promptText.slice(0, 60)}..."`);
   if (images?.length) {
     log(`   with ${images.length} image(s)`);
   }
+
+  // Determine streaming behavior:
+  // - null/undefined = normal (first message or agent idle)
+  // - 'steer' = steer the agent in a different direction while it's working
+  // - 'followUp' = queue as follow-up question while agent is working
+  const behavior = streamingBehavior || (entry._sending ? 'followUp' : undefined);
+  
+  // Check if agent is currently busy
+  if (entry._sending) {
+    log(`⏳ Agent is busy for ${clientSessionId}, using streamingBehavior: ${behavior}`);
+  }
+
   entry._sending = true;
   entry._sendingTimeout = setTimeout(() => {
     if (entry._sending) {
@@ -667,11 +688,15 @@ export async function sendPiPrompt(clientSessionId, promptText, images = null) {
   }, 120000);
 
   try {
-    log(`⏳ Calling session.prompt() for ${clientSessionId}...`);
+    log(`⏳ Calling session.prompt() for ${clientSessionId} with behavior: ${behavior || 'default'}...`);
+    const promptOptions = { 
+      expandPromptTemplates: true,
+      ...(behavior && { streamingBehavior: behavior })
+    };
     if (images?.length > 0) {
-      await entry.session.prompt(promptText, { images, expandPromptTemplates: true });
+      await entry.session.prompt(promptText, { ...promptOptions, images });
     } else {
-      await entry.session.prompt(promptText);
+      await entry.session.prompt(promptText, promptOptions);
     }
     entry._sending = false;
     if (entry._sendingTimeout) { clearTimeout(entry._sendingTimeout); entry._sendingTimeout = null; }

@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-15
+
+### Fixed (Critical)
+- **Removed Hardcoded llama3.2 Default** — ELIMINATED all hardcoded `llama3.2` references that caused "Model not available" errors
+  - **Root Cause**: Code was defaulting to `llama3.2` everywhere, causing reconnect failures when user didn't have that model
+  - **Solution**: Now fetches available models from Ollama API (`/api/tags`) and uses first available
+  - **Files Changed**: `server.js` (8 locations), `pi-agent-adapter.js` (2 locations)
+  - **Error Messages**: No longer suggests `llama3.2` specifically - uses generic "check available models" message
+  - **Affected Flows**: Session reconnect, new session creation, connection test, status check
+
+### Fixed
+- **Multi-Session Streaming** — Fixed cross-session streaming leak where agent responses appeared in wrong sessions
+  - Each session now properly isolated with session-specific event handlers
+  - Streaming events correctly routed to their originating session only
+  
+- **Typing Indicator Persistence** — Fixed "Generating Response..." indicator disappearing after first message
+  - Made typing indicator session-specific with `_hasTypingIndicator` flag
+  - Added `checkAndRestoreTypingIndicator()` when switching back to active session
+  - Indicator now persists until agent finishes, even when switching between sessions
+
+- **Token Counter** — Fixed token usage not updating
+  - Token updates now properly matched to generating sessions
+  - Display updates for the active session being viewed
+
+- **Mobile Sidebar** — Fixed hamburger menu on login screen and sidebar not collapsing
+  - Hidden on login screen, shows after authentication
+  - Added swipe-to-close gesture (swipe left on sidebar)
+
+### Added
+- **OpenCode Zen Provider** — Full support for OpenCode Zen AI gateway
+  - Added to launcher.py with UI configuration
+  - 5 free tier models: DeepSeek V4 Flash, MiniMax M2.5, Ring 2.6 1T, Nemotron 3 Super, Big Pickle
+  - Environment variables: `OPENCODE_ZEN_API_KEY`, `OPENCODE_ZEN_MODEL`
+
+## [1.1.3] - 2026-05-15
+
+### Fixed
+- **Mobile Sidebar Issues** — Fixed critical mobile UI bugs:
+  - Sidebar toggle hamburger menu (☰) now properly hidden on login screen
+  - Changed auth-screen to use `position: fixed` with `z-index: 1000` to properly cover entire viewport
+  - Updated CSS selectors to use `.show` class instead of checking inline styles
+  - Added JS initialization: `sidebarToggle.style.display = 'none'` on page load  
+  - Toggle now only shows after successful login
+  - Fixed auth screen visibility management using CSS classes (.show) for more reliable hiding
+  - Added swipe-to-close gesture for mobile sidebar (swipe left to close)
+  - Added both `click` and `touchend` event listeners for better PWA/mobile support
+
+### Added
+- **OpenCode Zen Support in Launcher** — The Python GUI launcher now supports OpenCode Zen:
+  - Added "✨ OpenCode Zen (Cloud)" radio button option in LLM Provider settings
+  - Added OpenCode Zen API Key configuration card with input field
+  - Added test connection button for OpenCode Zen
+  - Settings are saved to both JSON config and `.env` file
+  - Added `OPENCODE_ZEN_API_KEY` and `OPENCODE_ZEN_MODEL` environment variables
+  - Shows free tier model availability in connection test
+
+## [1.1.2] - 2026-05-15
+
+### Fixed
+- **Message Queuing** — Fixed "Agent is already processing" error when sending follow-up messages while agent is working
+  - Removed blocking `_sending` flag check that was rejecting new messages
+  - Added PI SDK's `streamingBehavior` option with `'followUp'` mode for automatic message queuing
+  - Messages now queue automatically when agent is busy, no longer block users
+  - Added visual notification when message is queued
+
+### Added
+- **Agent Activity Display (TUI-like)** — Users can now see what the agent is doing during streaming, just like the PI Agent terminal TUI
+  - Shows "Agent is working..." status indicator when agent starts processing
+  - Shows real-time thinking/reasoning steps with 🤔 indicator
+  - Shows tool execution start/end with progress indicators
+  - Activity indicators auto-clean up when stream completes
+  - Added new WebSocket events: `agent_status`, `agent_thinking`
+  - Added CSS animations for agent activity (pulsing indicators, spinners)
+
+## [1.1.1] - 2026-05-15
+
+### Fixed
+- **Multi-Session Stability** — Fixed critical bug where opening a new chat session would cause existing active sessions to stop. 
+  - Root cause: All PI Agent sessions were sharing the same session persistence directory, causing session state files to collide
+  - Solution: Each session now gets its own unique subdirectory (`PI_SESSION_DIR/session-{sessionId}/`)
+  - Sessions are now properly isolated and can run concurrently without interference
+
 ## [1.1.0] - 2026-05-15
 
 ### Added

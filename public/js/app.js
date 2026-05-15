@@ -71,6 +71,9 @@
     const sidebar = document.querySelector('.sidebar');
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarOverlay = document.getElementById('sidebarOverlay');
+    
+    console.log('[Init] Mobile elements - sidebar:', !!sidebar, 'toggle:', !!sidebarToggle, 'overlay:', !!sidebarOverlay);
+    
     const pwaInstallBtn = document.getElementById('pwaInstallBtn');
     const ptrIndicator = document.getElementById('ptrIndicator');
     const mainContent = document.querySelector('.main-content');
@@ -99,10 +102,10 @@
     const testConnectionBtn = document.getElementById('testConnectionBtn');
     const chatMoreBtn = document.getElementById('chatMoreBtn');
     const chatMoreGroup = document.getElementById('chatMoreGroup');
-    
+
     // Chat feature toggle state
     let chatEnabled = true;
-    
+
     // Image Upload Elements
     const uploadImageBtn = document.getElementById('uploadImageBtn');
     const imageUploadInput = document.getElementById('imageUploadInput');
@@ -142,11 +145,11 @@
       e.preventDefault();
       const email = emailInput.value;
       const password = passwordInput.value;
-      
+
       authError.classList.remove('show');
       loginBtn.disabled = true;
       loginBtn.textContent = 'Signing in...';
-      
+
       // Send auth via WebSocket
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'auth', email, password }));
@@ -160,13 +163,13 @@
 
     // Wake Lock API - keep screen on when terminal is active
     let wakeLock = null;
-    
+
     async function requestWakeLock() {
       try {
         if ('wakeLock' in navigator && !wakeLock) {
           wakeLock = await navigator.wakeLock.request('screen');
           console.log('Wake Lock acquired');
-          
+
           wakeLock.addEventListener('release', () => {
             console.log('Wake Lock released');
             wakeLock = null;
@@ -176,7 +179,7 @@
         console.warn('Wake Lock not available:', err.message);
       }
     }
-    
+
     async function releaseWakeLock() {
       if (wakeLock) {
         try {
@@ -187,7 +190,7 @@
         wakeLock = null;
       }
     }
-    
+
     // Re-acquire wake lock when page becomes visible
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && activeTerminalId) {
@@ -211,7 +214,7 @@
       connecting = true;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${protocol}//${window.location.host}`);
-      
+
       ws.onopen = () => {
         connecting = false;
         // Cancel reconnect timeout since we're now connected
@@ -250,7 +253,7 @@
           }
         }
       };
-      
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -259,7 +262,7 @@
           console.error('Failed to parse message:', err);
         }
       };
-      
+
       const thisSocket = ws;
       ws.onclose = () => {
         // Only process close for the current active WebSocket instance.
@@ -280,7 +283,7 @@
         // Schedule reconnect
         reconnectTimeout = setTimeout(connect, 3000);
       };
-      
+
       ws.onerror = (err) => {
         // Don't set connecting = false here; let onclose handle it
         console.error('WebSocket error:', err);
@@ -297,7 +300,7 @@
         statusText.textContent = 'Disconnected - Reconnecting...';
       }
     }
-    
+
     async function fetchServerStatus() {
       try {
         const response = await fetch('/api/status', {
@@ -314,7 +317,7 @@
         console.error('Failed to fetch server status:', err);
       }
     }
-    
+
     function updateChatFeatureVisibility() {
       if (chatEnabled) {
         viewChatBtn?.classList.remove('hidden');
@@ -335,15 +338,15 @@
         case 'auth_success':
           handleAuthSuccess(data);
           break;
-          
+
         case 'auth_failed':
           handleAuthFailed(data.message);
           break;
-          
+
         case 'logged_out':
           handleLogout();
           break;
-          
+
         case 'browse_result':
           if (data.success) {
             renderDirectory(data);
@@ -351,7 +354,7 @@
             showError('Failed to browse: ' + data.error);
           }
           break;
-          
+
         case 'terminal_started':
           const termData = terminals.get(data.terminalId);
           if (termData) {
@@ -368,7 +371,7 @@
             const shellName = termData.shell || 'Terminal';
             terminalInfo.textContent = `${shellName} - ${data.cwd}`;
             terminalStatus.textContent = `${shellName} active`;
-            
+
             // Show reconnection message if applicable
             if (data.reconnected) {
               termData.terminal.writeln('\r\n\x1b[1;32m[Session restored - reconnected to existing terminal]\x1b[0m\r\n');
@@ -399,7 +402,7 @@
             }
           }
           break;
-          
+
         case 'existing_terminals':
           // Guard against concurrent/race processing and duplicate terminal creation
           if (processingExistingTerminals) break;
@@ -440,11 +443,11 @@
             setTimeout(() => { processingExistingTerminals = false; }, 500);
           }
           break;
-          
+
         case 'password_reset':
           handlePasswordResetSuccess(data);
           break;
-          
+
         case 'chat_initialized':
         case 'chat_session_created':
         case 'chat_session_deleted':
@@ -469,7 +472,7 @@
         case 'subagent_completed':
           handleChatMessage(data);
           break;
-          
+
         case 'error':
           console.error('Server error:', data.message);
           if (data.message?.includes('Not authenticated')) {
@@ -483,31 +486,34 @@
       currentUser = data.user;
       authToken = data.token;
       localStorage.setItem('terminal_auth_token', authToken);
-      
+
       // Show app
-      authScreen.style.display = 'none';
+      authScreen.classList.remove('show');
       appContainer.classList.add('show');
       
+      // Show sidebar toggle (for mobile/desktop)
+      if (sidebarToggle) sidebarToggle.style.display = 'flex';
+
       // Update UI
       // (user e-mail is intentionally NOT displayed in the UI for privacy)
-      
+
       // Initialize terminal system if not already
       if (!terminalSystemInitialized) {
         initTerminal();
         terminalSystemInitialized = true;
       }
-      
+
       // Fetch available shells after successful auth
       fetchAvailableShells();
-      
+
       // Fetch server config (including chat enabled status)
       fetchServerStatus();
-      
+
       // If reconnecting, ask server for existing terminals first
       if (isReconnecting && ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'get_terminals' }));
         isReconnecting = false;
-        
+
         // Still restore directory
         const sessionData = restoreSessionState();
         if (sessionData?.currentPath) {
@@ -520,7 +526,7 @@
         const sessionData = restoreSessionState();
         if (sessionData?.currentPath) {
           browseDirectory(sessionData.currentPath);
-          
+
           if (sessionData.terminals?.length > 0) {
             setTimeout(() => {
               sessionData.terminals.forEach(t => {
@@ -532,7 +538,7 @@
           browseDirectory();
         }
       }
-      
+
       loginBtn.disabled = false;
       loginBtn.textContent = 'Sign In';
 
@@ -569,6 +575,8 @@
       loginBtn.disabled = false;
       loginBtn.textContent = 'Sign In';
       localStorage.removeItem('terminal_auth_token');
+      // Ensure auth screen is visible
+      authScreen.classList.add('show');
     }
 
     function handleLogout() {
@@ -577,8 +585,13 @@
       localStorage.removeItem('terminal_auth_token');
 
       // Show auth screen
-      authScreen.style.display = 'flex';
+      authScreen.classList.add('show');
       appContainer.classList.remove('show');
+      
+      // Hide sidebar toggle and overlay
+      if (sidebarToggle) sidebarToggle.style.display = 'none';
+      if (sidebarOverlay) sidebarOverlay.classList.remove('show');
+      if (sidebar) sidebar.classList.remove('show');
 
       // Reset form
       passwordInput.value = '';
@@ -595,7 +608,7 @@
       terminalCounter = 0;
       renderTabs();
       document.getElementById('noTerminalMsg')?.classList.remove('hidden');
-      
+
       // Clear session state
       clearSessionState();
 
@@ -609,7 +622,7 @@
     // ==========================================
     // TERMINAL SHELL MANAGEMENT
     // ==========================================
-    
+
     async function fetchAvailableShells() {
       try {
         const response = await fetch('/api/terminals/available', {
@@ -617,19 +630,19 @@
             'Authorization': `Bearer ${authToken}`
           }
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           if (data.success) {
             availableShells = data.terminals;
             defaultShell = data.default;
-            
+
             // If no shell selected yet, use default
             if (!selectedShell) {
               selectedShell = defaultShell;
               localStorage.setItem('terminal_selected_shell', selectedShell);
             }
-            
+
             console.log('🖥️  Available shells:', availableShells.map(s => s.name).join(', '));
             return true;
           }
@@ -639,14 +652,14 @@
       }
       return false;
     }
-    
+
     function showShellSelectorModal(onSelect) {
       // Remove existing modal
       const existingModal = document.getElementById('shellSelectorModal');
       if (existingModal) {
         existingModal.remove();
       }
-      
+
       // Create modal
       const modal = document.createElement('div');
       modal.id = 'shellSelectorModal';
@@ -663,15 +676,15 @@
         z-index: 10000;
         padding: 20px;
       `;
-      
+
       // Build shell options
       const shellOptions = availableShells.map(shell => {
         const isSelected = shell.id === selectedShell;
         const isRecommended = shell.recommended;
         return `
-          <div class="shell-option ${isSelected ? 'selected' : ''}" data-shell="${shell.id}" 
-               style="padding: 16px; border: 2px solid ${isSelected ? 'var(--accent-primary)' : 'var(--bg-lighter)'}; 
-                      border-radius: 8px; cursor: pointer; margin-bottom: 12px; 
+          <div class="shell-option ${isSelected ? 'selected' : ''}" data-shell="${shell.id}"
+               style="padding: 16px; border: 2px solid ${isSelected ? 'var(--accent-primary)' : 'var(--bg-lighter)'};
+                      border-radius: 8px; cursor: pointer; margin-bottom: 12px;
                       background: var(--bg-medium); transition: all 0.2s;
                       display: flex; align-items: center; gap: 12px;"
                onmouseover="this.style.borderColor='var(--accent-primary)'; this.style.background='var(--bg-lighter)'"
@@ -685,24 +698,24 @@
           </div>
         `;
       }).join('');
-      
+
       modal.innerHTML = `
         <div style="background: var(--bg-dark); border-radius: 12px; padding: 24px; max-width: 500px; width: 100%; max-height: 80vh; overflow-y: auto;">
           <h3 style="margin: 0 0 8px 0; color: var(--text-primary);">Select Terminal</h3>
           <p style="margin: 0 0 20px 0; color: var(--text-muted); font-size: 14px;">Choose your preferred shell for this terminal session:</p>
           <div class="shell-options" style="margin-bottom: 20px;">${shellOptions}</div>
           <div style="display: flex; gap: 12px; justify-content: flex-end;">
-            <button id="cancelShellSelect" style="padding: 10px 20px; border: 1px solid var(--bg-lighter); 
+            <button id="cancelShellSelect" style="padding: 10px 20px; border: 1px solid var(--bg-lighter);
                     background: transparent; color: var(--text-primary); border-radius: 6px; cursor: pointer;">Cancel</button>
-            <button id="confirmShellSelect" style="padding: 10px 20px; border: none; 
+            <button id="confirmShellSelect" style="padding: 10px 20px; border: none;
                     background: var(--accent-primary); color: #000; border-radius: 6px; cursor: pointer; font-weight: 500;">Open Terminal</button>
           </div>
         </div>
       `;
-      
+
       // Handle shell selection
       let tempSelectedShell = selectedShell;
-      
+
       modal.querySelectorAll('.shell-option').forEach(option => {
         option.addEventListener('click', () => {
           modal.querySelectorAll('.shell-option').forEach(opt => {
@@ -713,7 +726,7 @@
           option.classList.add('selected');
           option.style.borderColor = 'var(--accent-primary)';
           tempSelectedShell = option.dataset.shell;
-          
+
           // Add checkmark
           const checkmark = document.createElement('div');
           checkmark.className = 'checkmark';
@@ -722,20 +735,20 @@
           option.appendChild(checkmark);
         });
       });
-      
+
       // Handle buttons
       modal.querySelector('#cancelShellSelect').addEventListener('click', () => {
         modal.remove();
         if (onSelect) onSelect(null);
       });
-      
+
       modal.querySelector('#confirmShellSelect').addEventListener('click', () => {
         selectedShell = tempSelectedShell;
         localStorage.setItem('terminal_selected_shell', selectedShell);
         modal.remove();
         if (onSelect) onSelect(selectedShell);
       });
-      
+
       // Close on backdrop click
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
@@ -743,10 +756,10 @@
           if (onSelect) onSelect(null);
         }
       });
-      
+
       document.body.appendChild(modal);
     }
-    
+
     // Helper function to get shell icon based on shell name
     function getShellIcon(shellName) {
       if (!shellName) return '🖥️';
@@ -764,7 +777,7 @@
     // ==========================================
     // SESSION PERSISTENCE
     // ==========================================
-    
+
     const SESSION_KEY = 'terminal_session_state';
     const ACTIVE_CHAT_SESSION_KEY = 'active_chat_session_id';
 
@@ -824,12 +837,12 @@
         return null;
       }
     }
-    
+
     function restoreSessionState() {
       try {
         const saved = localStorage.getItem(SESSION_KEY);
         if (!saved) return null;
-        
+
         const sessionData = JSON.parse(saved);
         // Only restore if less than 24 hours old
         if (Date.now() - sessionData.timestamp > 24 * 60 * 60 * 1000) {
@@ -842,11 +855,11 @@
         return null;
       }
     }
-    
+
     function clearSessionState() {
       localStorage.removeItem(SESSION_KEY);
     }
-    
+
     // Save session before page unload
     window.addEventListener('beforeunload', () => {
       if (currentUser) {
@@ -862,17 +875,17 @@
           <div style="margin-top: 8px; font-size: 11px; color: var(--warning);">Save this password securely!</div>
         `;
       }
-      
+
       // Show logout message
       const logoutMessage = document.createElement('div');
       logoutMessage.style.cssText = 'margin-top: 16px; padding: 12px; background: var(--warning); color: #000; border-radius: 4px; font-weight: 500;';
       logoutMessage.textContent = 'Password reset successful. You will be logged out in 5 seconds...';
       generatedPasswordContainer.appendChild(logoutMessage);
-      
+
       resetSuccess.textContent = data.message;
       resetSuccess.classList.add('show');
       confirmResetBtn.disabled = true;
-      
+
       // Logout user after delay
       setTimeout(() => {
         resetModal.classList.remove('show');
@@ -898,12 +911,12 @@
       currentPath = data.path;
       currentPathEl.textContent = currentPath;
       openTerminalBtn.disabled = false;
-      
+
       // Save session state when directory changes
       saveSessionState();
-      
+
       directoryListEl.innerHTML = '';
-      
+
       // Parent directory link
       if (data.parent) {
         const parentItem = document.createElement('div');
@@ -912,7 +925,7 @@
         parentItem.onclick = () => browseDirectory(data.parent);
         directoryListEl.appendChild(parentItem);
       }
-      
+
       // Folders
       if (data.folders && data.folders.length > 0) {
         data.folders.forEach(folder => {
@@ -929,7 +942,7 @@
           directoryListEl.appendChild(item);
         });
       }
-      
+
       // Files
       if (data.files && data.files.length > 0) {
         data.files.forEach(file => {
@@ -939,7 +952,7 @@
           directoryListEl.appendChild(item);
         });
       }
-      
+
       if (data.folders?.length === 0 && data.files?.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'directory-item file';
@@ -959,7 +972,7 @@
       // Remove ANSI escape sequences (e.g. \x1b[32m, \x1b[0m, \x1b[K, etc.)
       return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
     }
-    
+
     // Show context menu for directory items (right-click on folders)
     function showDirectoryContextMenu(event, folderPath, folderName) {
       // Remove any existing context menu
@@ -967,7 +980,7 @@
       if (existingMenu) {
         existingMenu.remove();
       }
-      
+
       // Create context menu
       const menu = document.createElement('div');
       menu.id = 'directoryContextMenu';
@@ -985,7 +998,7 @@
         z-index: 10000;
         font-size: 13px;
       `;
-      
+
       menu.innerHTML = `
         <div class="context-menu-item" data-action="browse" style="padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
           <span>📂</span> Browse
@@ -997,7 +1010,7 @@
           <span>💬</span> Open Chat in Directory
         </div>
       `;
-      
+
       // Add hover styles
       const style = document.createElement('style');
       style.textContent = `
@@ -1006,15 +1019,15 @@
         }
       `;
       menu.appendChild(style);
-      
+
       // Handle menu item clicks
       menu.addEventListener('click', (e) => {
         const item = e.target.closest('.context-menu-item');
         if (!item) return;
-        
+
         const action = item.dataset.action;
         menu.remove();
-        
+
         switch (action) {
           case 'browse':
             browseDirectory(folderPath);
@@ -1027,7 +1040,7 @@
             break;
         }
       });
-      
+
       // Close menu when clicking outside
       const closeMenu = (e) => {
         if (!menu.contains(e.target)) {
@@ -1035,29 +1048,29 @@
           document.removeEventListener('click', closeMenu);
         }
       };
-      
+
       // Add to DOM
       document.body.appendChild(menu);
-      
+
       // Close on outside click (after small delay to avoid immediate close)
       setTimeout(() => {
         document.addEventListener('click', closeMenu);
       }, 100);
     }
-    
+
     // Create a new chat session for a specific directory
     function createChatInDirectory(folderPath, folderName) {
       // Switch to chat view first
       showChatView();
-      
+
       // Create chat session with directory context
       const session = createChatSessionWithDirectory(folderName, folderPath);
-      
+
       if (session) {
         showNotification(`Chat session created for "${folderName}"`, 'success');
       }
     }
-    
+
     // Resolve a valid model for new sessions, preferring the UI selection
     function resolveSessionModel() {
       const selected = chatModelSelect?.value;
@@ -1075,14 +1088,14 @@
         return null;
       }
       console.log('📁 createChatSessionWithDirectory called:', { name, workingDirectory, existingSessions: chatSessions.size });
-      
+
       // Limit the number of sessions to prevent UI clutter
       const MAX_SESSIONS = 20;
       if (chatSessions.size >= MAX_SESSIONS) {
         showNotification(`Maximum of ${MAX_SESSIONS} chat sessions reached. Please delete some sessions.`, 'warning');
         return null;
       }
-      
+
       const sessionModel = resolveSessionModel();
       if (!sessionModel) {
         showNotification('Models are still loading, please wait a moment and try again.', 'warning');
@@ -1090,10 +1103,10 @@
         loadTtsVoices();
         return null;
       }
-      
+
       const sessionId = generateSessionId();
       const sessionName = name || `Chat ${chatSessions.size + 1}`;
-      
+
       const session = {
         id: sessionId,
         name: sessionName,
@@ -1113,22 +1126,22 @@
         totalCacheWriteTokens: 0,
         totalReasoningTokens: 0
       };
-      
+
       chatSessions.set(sessionId, session);
       console.log('✅ Created local session:', sessionId, 'Total sessions:', chatSessions.size);
-      
+
       // Render the updated tabs
       renderChatTabs();
-      
+
       // Set as active (may be blocked if stream is in progress)
       setActiveChatSession(sessionId);
-      
+
       // Only clear the message container if we actually switched to this session
       if (activeChatSessionId === sessionId) {
         const chatMessagesContainer = document.getElementById('chatMessagesContainer');
         if (chatMessagesContainer) {
           chatMessagesContainer.innerHTML = '';
-        
+
         // Show welcome message with directory context
         if (workingDirectory) {
           const welcomeDiv = document.createElement('div');
@@ -1144,7 +1157,7 @@
         }
         }
       }
-      
+
       return session;
     }
 
@@ -1161,10 +1174,10 @@
           return null; // Terminal creation deferred
         }
       }
-      
+
       return createTerminalInternal(cwd, existingTerminalId, shellToUse);
     }
-    
+
     function createTerminalInternal(cwd, existingTerminalId = null, shellToUse = null) {
       // Use existing terminalId if reconnecting, otherwise generate new one
       let terminalId;
@@ -1179,7 +1192,7 @@
         terminalCounter++;
         terminalId = `term-${terminalCounter}`;
       }
-      
+
       const tabName = cwd ? cwd.split(/[\/]/).pop() || cwd : `Terminal ${terminalCounter}`;
 
       // Create terminal element
@@ -1226,7 +1239,7 @@
 
       // Open terminal BEFORE making it active so xterm can measure properly
       term.open(terminalEl);
-      
+
       // Switch to new terminal (this makes it visible)
       switchToTerminal(terminalId);
 
@@ -1327,7 +1340,7 @@
         });
         terminalInfo.textContent = next.cwd ? `${next.shell || 'Terminal'} - ${next.cwd}` : `${next.shell || 'Terminal'} - Not connected`;
         terminalStatus.textContent = next.isActive ? `${next.shell || 'Terminal'} active` : `${next.shell || 'Terminal'} ready`;
-        
+
         // Request wake lock to keep screen on when terminal is active
         requestWakeLock();
       }
@@ -1352,7 +1365,7 @@
 
       // Remove from map
       terminals.delete(terminalId);
-      
+
       // Save session state
       saveSessionState();
 
@@ -1526,7 +1539,7 @@
           `;
           changeEmailSuccess.classList.add('show');
           confirmChangeEmailBtn.disabled = true;
-          
+
           // Logout user after delay
           setTimeout(() => {
             changeEmailModal.classList.remove('show');
@@ -1547,7 +1560,7 @@
       if (currentPath) {
         // Create new terminal in current directory
         createTerminal(currentPath);
-        
+
         // Close sidebar on mobile when opening terminal
         if (window.innerWidth <= 768 && sidebar) {
           sidebar.classList.remove('show');
@@ -1731,7 +1744,7 @@
     window.deleteSavedCommand = async function(index) {
       const cmd = savedCommands[index];
       if (!cmd) return;
-      
+
       if (confirm('Delete this saved command?')) {
         await removeSavedCommand(cmd.id);
       }
@@ -1819,18 +1832,32 @@
     }
 
     if (sidebarToggle && sidebarOverlay) {
+      console.log('[Init] Attaching sidebar event listeners');
+      
       function toggleMobileSidebar() {
+        console.log('[Sidebar Toggle] Clicked! isDesktop:', isDesktop());
         if (isDesktop()) {
           appContainer.classList.toggle('sidebar-collapsed');
           localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(appContainer.classList.contains('sidebar-collapsed')));
         } else {
           const isOpen = sidebar.classList.contains('show');
+          console.log('[Sidebar Toggle] Mobile mode, sidebar is Open:', isOpen);
           if (isOpen) {
             sidebar.classList.remove('show');
             sidebarOverlay.classList.remove('show');
+            // EMERGENCY: Force styles inline
+            sidebar.style.transform = 'translateX(-100%)';
+            sidebar.style.display = 'none';
+            sidebarOverlay.style.display = 'none';
+            console.log('[Sidebar Toggle] Sidebar closed with inline styles');
           } else {
             sidebar.classList.add('show');
             sidebarOverlay.classList.add('show');
+            // EMERGENCY: Force styles inline in case CSS isn't working
+            sidebar.style.transform = 'translateX(0)';
+            sidebar.style.display = 'flex';
+            sidebarOverlay.style.display = 'block';
+            console.log('[Sidebar Toggle] Sidebar opened with inline styles');
           }
         }
       }
@@ -1840,7 +1867,10 @@
         sidebarOverlay.classList.remove('show');
       }
 
-      sidebarToggle.addEventListener('click', toggleMobileSidebar);
+      sidebarToggle.addEventListener('click', (e) => {
+        console.log('[Sidebar] Hamburger clicked');
+        toggleMobileSidebar();
+      });
       // Also handle touch for PWA mobile where click may be delayed
       sidebarToggle.addEventListener('touchend', (e) => {
         e.preventDefault();
@@ -1852,23 +1882,40 @@
         e.preventDefault();
         closeMobileSidebar();
       });
+      
+      // Swipe to close sidebar on mobile
+      let touchStartX = 0;
+      sidebar.addEventListener('touchstart', (e) => {
+        touchStartX = e.touches[0].clientX;
+      }, { passive: true });
+      
+      sidebar.addEventListener('touchmove', (e) => {
+        if (!sidebar.classList.contains('show')) return;
+        const touchX = e.touches[0].clientX;
+        const diff = touchStartX - touchX;
+        // If swiping left more than 50px, close sidebar
+        if (diff > 50) {
+          closeMobileSidebar();
+        }
+      }, { passive: true });
     }
 
-    window.addEventListener('resize', () => {
-      applySidebarCollapseState();
+    // Debug: Track all clicks
+    document.addEventListener('click', (e) => {
+      console.log('[Click Debug] Clicked element:', e.target.tagName, e.target.id, e.target.className);
     });
 
     // PWA Install Button
     let deferredPrompt = null;
-    
+
     function isPwaInstalled() {
       return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
     }
-    
+
     function isIos() {
       return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
     }
-    
+
     function showInstallModal(title, htmlContent) {
       const modal = document.createElement('div');
       modal.className = 'modern-modal-overlay show';
@@ -1889,7 +1936,7 @@
         if (e.target === modal) remove();
       });
     }
-    
+
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
       deferredPrompt = e;
@@ -1897,13 +1944,13 @@
         pwaInstallBtn.classList.add('show');
       }
     });
-    
+
     if (pwaInstallBtn) {
       // Show button on iOS immediately if not installed
       if (isIos() && !isPwaInstalled()) {
         pwaInstallBtn.classList.add('show');
       }
-      
+
       pwaInstallBtn.addEventListener('click', async () => {
         if (deferredPrompt) {
           deferredPrompt.prompt();
@@ -1914,7 +1961,7 @@
           deferredPrompt = null;
           return;
         }
-        
+
         if (isIos()) {
           showInstallModal(
             'Install on iOS',
@@ -1927,7 +1974,7 @@
           );
           return;
         }
-        
+
         // Generic fallback for other browsers
         showInstallModal(
           'Install App',
@@ -1940,7 +1987,7 @@
         );
       });
     }
-    
+
     window.addEventListener('appinstalled', () => {
       console.log('PWA was installed');
       pwaInstallBtn?.classList.remove('show');
@@ -1949,11 +1996,11 @@
 
     // Register Service Worker for background support
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', async () => {
+      (async () => {
         try {
           swRegistration = await navigator.serviceWorker.register('/sw.js');
           console.log('Service Worker registered:', swRegistration.scope);
-          
+
           // Listen for updates
           swRegistration.addEventListener('updatefound', () => {
             const newWorker = swRegistration.installing;
@@ -1966,8 +2013,37 @@
         } catch (err) {
           console.error('Service Worker registration failed:', err);
         }
-      });
+      })();
     }
+
+    // EMERGENCY DEBUG: Check sidebar toggle immediately and repeatedly
+    console.log('[EMERGENCY] Running sidebar debug...');
+    function checkSidebarToggle() {
+      const btn = document.getElementById('sidebarToggle');
+      console.log('[EMERGENCY] sidebarToggle element:', btn);
+      if (btn) {
+        btn.onclick = function() {
+          console.log('[EMERGENCY] Button clicked via onclick!');
+          alert('Sidebar toggle clicked!');
+        };
+      }
+    }
+    checkSidebarToggle();
+    setTimeout(checkSidebarToggle, 1000);
+    setTimeout(checkSidebarToggle, 5000);
+    
+    // Debug: check sidebar toggle after a delay
+    setTimeout(() => {
+      const btn = document.getElementById('sidebarToggle');
+      if (btn) {
+        const styles = window.getComputedStyle(btn);
+        console.log('[Debug] Sidebar toggle computed styles:', {
+          display: styles.display,
+          visibility: styles.visibility,
+          zIndex: styles.zIndex
+        });
+      }
+    }, 3000);
 
     // Pull to Refresh (for mobile PWA) - only when at top and not interacting with terminal
     let ptrStartY = 0;
@@ -2002,7 +2078,7 @@
       if (ptrStartY > 0 && !ptrPulling) {
         const currentY = e.touches[0].clientY;
         const diff = currentY - ptrStartY;
-        
+
         // Increased threshold and check we're actually pulling down
         if (diff > ptrThreshold && window.scrollY === 0 && currentY > ptrStartY) {
           ptrPulling = true;
@@ -2015,7 +2091,7 @@
       if (ptrPulling) {
         ptrPulling = false;
         ptrIndicator?.classList.remove('show');
-        
+
         // Trigger page refresh only if we're still at the top
         if (window.scrollY === 0) {
           window.location.reload();
@@ -2029,7 +2105,7 @@
     let isReconnecting = false;
     let pingInterval = null;
     let swRegistration = null;
-    
+
     // Service Worker message handling
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', (event) => {
@@ -2045,7 +2121,7 @@
         }
       });
     }
-    
+
     // Register for background sync to keep alive when hidden
     async function registerBackgroundSync() {
       if ('serviceWorker' in navigator && swRegistration) {
@@ -2072,14 +2148,14 @@
         }
       }
     }
-    
+
     // Trigger background sync periodically when hidden
     setInterval(() => {
       if (document.visibilityState === 'hidden' && swRegistration) {
         registerBackgroundSync();
       }
     }, 30000); // Try to register sync every 30s when hidden
-    
+
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         // Reconnect WebSocket if needed (after phone unlock)
@@ -2103,7 +2179,7 @@
         registerBackgroundSync();
       }
     });
-    
+
     function startPingInterval() {
       if (pingInterval) clearInterval(pingInterval);
       pingInterval = setInterval(() => {
@@ -2116,7 +2192,7 @@
         }
       }, 30000); // Ping every 30 seconds
     }
-    
+
     function stopPingInterval() {
       // Only stop ping on full disconnect, not on visibility change
       if (pingInterval) {
@@ -2124,14 +2200,14 @@
         pingInterval = null;
       }
     }
-    
+
     // Handle beforeunload to mark intentional navigation
     window.addEventListener('beforeunload', () => {
       sessionStorage.setItem('intentional_reload', Date.now().toString());
       // Release wake lock on intentional navigation
       releaseWakeLock();
     });
-    
+
     // Check if this is a reload vs fresh start
     const lastUnload = sessionStorage.getItem('intentional_reload');
     if (lastUnload) {
@@ -2167,10 +2243,10 @@
       viewTerminalBtn.classList.remove('active');
       viewChatBtn.classList.add('active');
       updateHeaderForView('chat');
-      
+
       // Load Ollama config to populate model input
       loadOllamaConfig();
-      
+
       // Load sessions if first time
       if (chatSessions.size === 0) {
         loadChatSessions();
@@ -2180,12 +2256,12 @@
     function updateHeaderForView(view) {
       const terminalInfo = document.getElementById('terminalInfo');
       if (view === 'terminal') {
-        terminalInfo.textContent = activeTerminalId 
+        terminalInfo.textContent = activeTerminalId
           ? `Terminal - ${terminals.get(activeTerminalId)?.name || 'Active'}`
           : 'Terminal - Not connected';
       } else {
         const session = chatSessions.get(activeChatSessionId);
-        terminalInfo.textContent = session 
+        terminalInfo.textContent = session
           ? `Chat - ${session.name}`
           : 'Chat - Select or create a session';
       }
@@ -2205,7 +2281,7 @@
         showNotification('Chat feature is disabled', 'warning');
         return null;
       }
-      
+
       // Require working directory before creating a chat session
       if (!currentPath) {
         showNotification('Please select a working directory first. Use the file browser to open a folder, then start a chat.', 'warning');
@@ -2213,14 +2289,14 @@
         showTerminalView();
         return null;
       }
-      
+
       // Limit the number of sessions to prevent UI clutter
       const MAX_SESSIONS = 20;
       if (chatSessions.size >= MAX_SESSIONS) {
         showNotification(`Maximum of ${MAX_SESSIONS} chat sessions reached. Please delete some sessions.`, 'warning');
         return null;
       }
-      
+
       const sessionModel = model || resolveSessionModel();
       if (!sessionModel) {
         showNotification('Models are still loading, please wait a moment and try again.', 'warning');
@@ -2228,12 +2304,12 @@
         loadTtsVoices();
         return null;
       }
-      
+
       creatingSession = true;
-      
+
       const sessionId = generateSessionId();
       const sessionName = name || `Chat ${chatSessions.size + 1}`;
-      
+
       const session = {
         id: sessionId,
         name: sessionName,
@@ -2244,17 +2320,17 @@
         initializing: false,
         serverSessionId: null
       };
-      
+
       chatSessions.set(sessionId, session);
       renderChatTabs();
       setActiveChatSession(sessionId);
-      
+
       // Session creation is handled by initializeChatSession() in setActiveChatSession
       // No need to send duplicate request here
-      
+
       // Reset guard after a short delay to allow the init flow to start
       setTimeout(() => { creatingSession = false; }, 500);
-      
+
       return session;
     }
 
@@ -2276,7 +2352,7 @@
           return;
         }
       }
-      
+
       // CRITICAL FIX: Check if there's an active stream in the CURRENT session
       // If so, don't switch immediately - let the stream complete first
       if (activeChatSessionId) {
@@ -2289,7 +2365,7 @@
           return;
         }
       }
-      
+
       // Deactivate previous
       if (activeChatSessionId) {
         const prevTab = document.querySelector(`[data-session-id="${activeChatSessionId}"]`);
@@ -2303,13 +2379,13 @@
 
       if (session) {
         console.log('🎯 setActiveChatSession called:', sessionId, 'initialized:', session.initialized, 'initializing:', session.initializing);
-        
+
         const tab = document.querySelector(`[data-session-id="${sessionId}"]`);
         tab?.classList.add('active');
-        
+
         emptyChatState.style.display = 'none';
         chatActiveUi.style.display = 'flex';
-        
+
         if (chatModelSelect) {
           chatModelSelect.value = session.model;
         }
@@ -2320,15 +2396,15 @@
           // Lock provider for existing sessions; allow changes only for brand-new sessions
           chatProviderSelect.disabled = !!(session.initialized || session.serverSessionId);
         }
-                
+
         renderChatMessages(session);
-        
+
         // Reset global work indicators when switching tabs; only restore if this session has active work
         resetAgentWorkingIndicator();
         if (streamingMessages.has(session.id)) {
           showAgentWorkingIndicator();
         }
-        
+
         // Auto-initialize if not initialized and not already initializing
         // OR if the session has serverSessionId but needs server reconnect (loaded from API)
         if ((!session.initialized && !session.initializing) || session._needsServerReconnect) {
@@ -2340,7 +2416,7 @@
             updateChatStatus('connecting');
             enableChatInput(false);
           } else {
-            console.log('⏳ New session — deferring init until first message:', sessionId);
+            console.log('⏳ New session - deferring init until first message:', sessionId);
             updateChatStatus('online');
             enableChatInput(true);
           }
@@ -2357,7 +2433,7 @@
         chatActiveUi.style.display = 'none';
         activeChatSessionId = null;
       }
-      
+
       updateHeaderForView('chat');
     }
 
@@ -2370,7 +2446,7 @@
           <span>🗑️ Close All</span>
         </button>
       `;
-      
+
       chatSessions.forEach((session, sessionId) => {
         const tab = document.createElement('div');
         tab.className = `chat-tab ${sessionId === activeChatSessionId ? 'active' : ''}`;
@@ -2379,7 +2455,7 @@
           <span class="chat-tab-name">${session.name}</span>
           <button class="chat-tab-close" data-close="${sessionId}" title="Close session">×</button>
         `;
-        
+
         tab.addEventListener('click', (e) => {
           if (e.target.dataset.close) {
             e.stopPropagation();
@@ -2388,20 +2464,20 @@
             setActiveChatSession(sessionId);
           }
         });
-        
+
         // Add right-click context menu
         tab.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           showChatTabContextMenu(e, sessionId);
         });
-        
+
         chatTabs.insertBefore(tab, chatTabs.lastElementChild);
       });
-      
+
       document.getElementById('newChatSessionBtn2')?.addEventListener('click', () => {
         createChatSession();
       });
-      
+
       document.getElementById('closeAllChatSessionsBtn2')?.addEventListener('click', () => {
         showConfirmationModal(
           'Close All Chat Sessions',
@@ -2421,32 +2497,32 @@
         console.log('[renderChatMessages] BLOCKED - active stream in progress for session:', activeStreamingSession);
         return;
       }
-      
+
       // Also check specific session
       const activeStream = streamingMessages.get(session.id);
       if (activeStream) {
         console.log('[renderChatMessages] Skipping re-render, active stream in progress for', session.id);
         return;
       }
-      
+
       // Also check if we recently completed ANY stream (within last 1 second)
       // This prevents race conditions where render is called right after completion
-      const anyRecentStream = Array.from(chatSessions.values()).some(s => 
+      const anyRecentStream = Array.from(chatSessions.values()).some(s =>
         s._lastStreamCompleteTime && (Date.now() - s._lastStreamCompleteTime) < 1000
       );
       if (anyRecentStream) {
         console.log('[renderChatMessages] Skipping re-render, stream just completed');
         return;
       }
-      
+
       // Check if this session recently completed (within last 500ms)
       const lastStreamTime = session._lastStreamCompleteTime;
       if (lastStreamTime && (Date.now() - lastStreamTime) < 500) {
         console.log('[renderChatMessages] Skipping re-render, stream just completed for', session.id);
         return;
       }
-      
-      // Don't re-render active streaming sessions — the streamEl would be destroyed
+
+      // Don't re-render active streaming sessions - the streamEl would be destroyed
       const activeStreamEntry = [...streamingMessages.entries()].find(([_, el]) => el && el.parentNode);
       if (activeStreamEntry) {
         const activeStreamSessionId = activeStreamEntry[0];
@@ -2458,11 +2534,11 @@
 
       // Preserve typing indicator across re-renders (e.g. reconnect with history)
       const indicator = document.getElementById('typing-indicator');
-      
+
       chatMessagesContainer.innerHTML = '';
-      
+
       if (!Array.isArray(session.messages)) session.messages = [];
-      
+
       if (session.messages.length === 0 && !indicator) {
         chatMessagesContainer.innerHTML = `
           <div class="empty-chat-state" style="flex: 1; opacity: 0.7;">
@@ -2471,26 +2547,26 @@
         `;
         return;
       }
-      
+
       session.messages.forEach(msg => {
         // Skip messages with empty or missing content to avoid blank bubbles
         if (msg.content && typeof msg.content === 'string' && msg.content.trim().length > 0) {
           appendMessageToContainer(msg.content, msg.role);
         }
       });
-      
+
       // Re-attach streaming element if this session has an active stream
       const streamEl = streamingMessages.get(session.id);
       if (streamEl && !streamEl.parentNode) {
         chatMessagesContainer.appendChild(streamEl);
       }
-      
+
       // Restore typing indicator so it survives tab switches / history reloads,
       // but only if it belongs to the session being rendered
       if (indicator && indicator.dataset.sessionId === session.id) {
         chatMessagesContainer.appendChild(indicator);
       }
-      
+
       scrollToBottom();
     }
 
@@ -2520,7 +2596,7 @@
           // Bold (**text**)
           segment = segment.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 
-          // Italic (*text* or _text_) — avoid converting bold remnants
+          // Italic (*text* or _text_) - avoid converting bold remnants
           segment = segment.replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '<em>$1</em>');
           segment = segment.replace(/(?<!\w)_([^_]+)_(?!\w)/g, '<em>$1</em>');
 
@@ -2569,29 +2645,29 @@
       if (!content || (typeof content === 'string' && content.trim().length === 0)) {
         return;
       }
-      
+
       const messageEl = document.createElement('div');
       messageEl.className = `chat-message ${role}`;
-      
+
       let formattedContent = formatMarkdown(content);
-      
+
       // Build message content
       let messageHTML = formattedContent;
-      
+
       // Add image if present
       if (imagePath && role === 'user') {
         const imageFileName = imagePath.split('/').pop() || imagePath.split('\\').pop();
         messageHTML += `
           <div class="message-image">
-            <img src="/api/images/${encodeURIComponent(imagePath)}" alt="${escapeHtml(imageFileName)}" 
-                 style="max-width: 200px; border-radius: 8px; border: 1px solid var(--bg-lighter); margin-top: 8px; display: block;" 
+            <img src="/api/images/${encodeURIComponent(imagePath)}" alt="${escapeHtml(imageFileName)}"
+                 style="max-width: 200px; border-radius: 8px; border: 1px solid var(--bg-lighter); margin-top: 8px; display: block;"
                  onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"
             />
             <div class="image-error" style="display: none; color: var(--text-muted); font-size: 11px;">Image: ${escapeHtml(imageFileName)}</div>
           </div>
         `;
       }
-      
+
       // Add TTS button for assistant messages
       if (role === 'assistant') {
         const ttsBtn = document.createElement('button');
@@ -2647,7 +2723,7 @@
 
       messageEl.dataset.timestamp = Date.now();
       chatMessagesContainer.appendChild(messageEl);
-      
+
       // Auto-scroll to bottom after appending
       requestAnimationFrame(() => {
         scrollToBottom();
@@ -2731,9 +2807,9 @@
     function addMessageToActiveSession(content, role, imagePath = null) {
       const session = chatSessions.get(activeChatSessionId);
       if (!session) return;
-      
+
       session.messages.push({ role, content, timestamp: Date.now(), imagePath });
-      
+
       if (session.id === activeChatSessionId) {
         appendMessageToContainer(content, role, imagePath);
         scrollToBottom();
@@ -2742,13 +2818,13 @@
 
     function scrollToBottom() {
       if (!chatMessagesContainer) return;
-      
+
       // Use smooth scrolling for better UX
       chatMessagesContainer.scrollTo({
         top: chatMessagesContainer.scrollHeight,
         behavior: 'smooth'
       });
-      
+
       // Fallback for browsers that don't support smooth scrolling
       setTimeout(() => {
         chatMessagesContainer.scrollTop = chatMessagesContainer.scrollHeight;
@@ -2758,7 +2834,7 @@
     function deleteChatSession(sessionId) {
       const session = chatSessions.get(sessionId);
       if (!session) return;
-      
+
       // Check if session has a serverSessionId
       if (!session.serverSessionId) {
         // Session not synced with server yet, just remove locally
@@ -2771,7 +2847,7 @@
         showNotification(`"${session.name}" deleted`, 'success');
         return;
       }
-      
+
       // Use modern confirmation modal instead of browser confirm
       showConfirmationModal(
         'Delete Chat Session',
@@ -2781,21 +2857,21 @@
           if (ws?.readyState === WebSocket.OPEN) {
             // Send both client sessionId and serverSessionId for proper deletion
             console.log('Sending delete request for session:', sessionId, 'serverSessionId:', session.serverSessionId);
-            ws.send(JSON.stringify({ 
-              type: 'chat_session_delete', 
+            ws.send(JSON.stringify({
+              type: 'chat_session_delete',
               sessionId: sessionId,
-              serverSessionId: session.serverSessionId 
+              serverSessionId: session.serverSessionId
             }));
           }
-          
+
           // Remove from local map immediately for responsive UI
           chatSessions.delete(sessionId);
-          
+
           if (activeChatSessionId === sessionId) {
             const remaining = Array.from(chatSessions.keys());
             setActiveChatSession(remaining.length > 0 ? remaining[0] : null);
           }
-          
+
           renderChatTabs();
           showNotification(`"${session.name}" deleted`, 'success');
         }
@@ -2805,12 +2881,12 @@
     function renameChatSession() {
       const session = chatSessions.get(activeChatSessionId);
       if (!session) return;
-      
+
       const newName = prompt('Enter new name:', session.name);
       if (newName && newName.trim()) {
         session.name = newName.trim();
         renderChatTabs();
-        
+
         if (ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type: 'chat_session_rename',
@@ -2818,7 +2894,7 @@
             name: session.name
           }));
         }
-        
+
         updateHeaderForView('chat');
       }
     }
@@ -2826,7 +2902,7 @@
     function clearActiveSession() {
       const session = chatSessions.get(activeChatSessionId);
       if (!session) return;
-      
+
       // Use modern confirmation modal instead of browser confirm
       showConfirmationModal(
         'Clear Chat History',
@@ -2836,14 +2912,14 @@
           session.messages = [];
           session.initialized = false;
           renderChatMessages(session);
-          
+
           if (ws?.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
               type: 'chat_session_clear',
               sessionId: session.id
             }));
           }
-          
+
           updateChatStatus('offline');
           enableChatInput(false);
           showNotification(`"${session.name}" cleared`, 'success');
@@ -2857,24 +2933,24 @@
         console.log('Chat sessions already loading, skipping...');
         return;
       }
-      
+
       // Prevent reloading if we already have sessions loaded
       if (chatSessions.size > 0) {
         console.log('Chat sessions already loaded, skipping...');
         return;
       }
-      
+
       chatSessionsLoading = true;
-      
+
       try {
         const response = await fetch('/api/chat/sessions?limit=10', {
           headers: { 'Authorization': `Bearer ${authToken}` }
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           console.log(`Loaded ${data.sessions?.length || 0} chat sessions from server`);
-          
+
           if (data.sessions && data.sessions.length > 0) {
             // Preserve local-only sessions that haven't been saved to server yet
             const localOnlySessions = [];
@@ -2883,24 +2959,24 @@
                 localOnlySessions.push({ id, session });
               }
             });
-            
+
             // Clear any existing server sessions first to prevent duplicates
             chatSessions.clear();
             chatSessionCounter = 0;
-            
+
             // Restore local-only sessions
             localOnlySessions.forEach(({ id, session }) => {
               chatSessions.set(id, session);
             });
-            
+
             // Only load most recent 10 sessions to prevent clutter
             const sessionsToLoad = data.sessions.slice(0, 10);
-            
+
             sessionsToLoad.forEach(serverSession => {
               // Generate client session ID from server session ID if available
               // Use a stable prefix so the ID is consistent across refreshes
-              const clientSessionId = serverSession.serverSessionId 
-                ? `chat_${serverSession.serverSessionId}` 
+              const clientSessionId = serverSession.serverSessionId
+                ? `chat_${serverSession.serverSessionId}`
                 : generateSessionId();
               const session = {
                 id: clientSessionId,
@@ -2928,9 +3004,9 @@
               };
               chatSessions.set(clientSessionId, session);
             });
-            
+
             renderChatTabs();
-            
+
             // Don't auto-select first session - let user choose
             // This prevents auto-initialization which creates new server sessions
             showEmptyChatState();
@@ -3026,13 +3102,13 @@
     async function loadAvailableModels(provider = null) {
       try {
         console.log('Loading available models...');
-        
+
         // Check auth token
         if (!authToken) {
           console.warn('No auth token available, cannot load models');
           return;
         }
-        
+
         const targetProvider = provider || chatProviderSelect?.value || 'ollama';
         const response = await fetch(`/api/chat/models?provider=${encodeURIComponent(targetProvider)}`, {
           headers: { 'Authorization': `Bearer ${authToken}` }
@@ -3041,16 +3117,16 @@
         if (response.ok) {
           const data = await response.json();
           console.log('Available models:', data.models);
-          
+
           availableModels = data.models || [];
-          
+
           // Populate model select
           if (chatModelSelect) {
             // Save current selection before clearing
             const currentSelection = chatModelSelect.value;
-            
+
             chatModelSelect.innerHTML = '';
-            
+
             if (availableModels.length === 0) {
               console.warn('No models returned from server, chat may not work');
               const option = document.createElement('option');
@@ -3067,7 +3143,7 @@
               });
               console.log(`Populated model selector with ${availableModels.length} models`);
               chatModelSelect.disabled = false;
-              
+
               // Restore selection: prefer current value (in case user changed it during async load),
               // then fall back to the selection captured when loadAvailableModels started
               const modelIds = availableModels.map(m => m.id);
@@ -3179,17 +3255,17 @@
     // Test connection to model
     async function testModelConnection() {
       if (!chatModelSelect) return;
-      
+
       const model = chatModelSelect.value;
       if (!model) {
         showChatError('Please select a model first');
         return;
       }
-      
+
       testConnectionBtn.disabled = true;
       testConnectionBtn.textContent = '⏳ Testing...';
       hideChatError();
-      
+
       try {
         const response = await fetch('/api/chat/test-connection', {
           method: 'POST',
@@ -3199,9 +3275,9 @@
           },
           body: JSON.stringify({ model })
         });
-        
+
         const data = await response.json();
-        
+
         if (data.success) {
           showNotification(`✅ Connection successful: ${data.provider} - ${model}`, 'success');
         } else {
@@ -3249,7 +3325,7 @@
 
       // Clear any pending init since we're processing now
       pendingSessionInit = null;
-      
+
       // Set a timeout to detect stuck connections
       if (session.initTimeout) {
         clearTimeout(session.initTimeout);
@@ -3262,7 +3338,7 @@
           updateChatStatus('offline');
         }
       }, 30000); // 30 second timeout
-      
+
       // Check if this is a reconnect to an existing server session
       if (session.serverSessionId) {
         // Reconnecting to existing session - use reconnect flow
@@ -3301,15 +3377,15 @@
           console.error('WebSocket not open! State:', ws?.readyState);
         }
       }
-      
+
       updateChatStatus('connecting');
     }
 
     function enableChatInput(enabled) {
       if (chatInput) {
         chatInput.disabled = !enabled;
-        chatInput.placeholder = enabled 
-          ? 'Type your message... (Shift+Enter for new line)' 
+        chatInput.placeholder = enabled
+          ? 'Type your message... (Shift+Enter for new line)'
           : 'Chat not connected';
       }
       if (sendChatBtn) {
@@ -3322,10 +3398,10 @@
 
     function updateChatStatus(status) {
       if (!chatStatusBadge) return;
-      
+
       // Remove all status classes
       chatStatusBadge.classList.remove('online', 'offline', 'connecting');
-      
+
       // Add appropriate class and text
       switch (status) {
         case 'online':
@@ -3348,36 +3424,36 @@
 
     function sendChatMessage() {
       const message = chatInput?.value.trim();
-      
+
       // Allow sending if there's a message or an image
       if (!message && !pendingImagePath) return;
-      
+
       const session = chatSessions.get(activeChatSessionId);
       if (!session) {
         showNotification('Please create or select a chat session first.', 'warning');
         return;
       }
-      
+
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         appendMessageToContainer('Not connected to server.', 'error');
         return;
       }
-      
+
       // Add user message to UI (with image if present)
       addMessageToActiveSession(message || '(Image attached)', 'user', pendingImagePath);
-      
+
       // Clear input
       chatInput.value = '';
       chatInput.style.height = 'auto';
-      
+
       // Store image path and clear upload UI
       const imagePathToSend = pendingImagePath;
       clearImageUpload();
-      
+
       // Add typing indicator while waiting for response
       addTypingIndicator();
       incrementAgentWork();
-      
+
       // If session not initialized, initialize it first and queue the message
       if (!session.initialized) {
         initializeChatSession(session.id);
@@ -3387,7 +3463,7 @@
         updateChatStatus('connecting');
         return;
       }
-      
+
       // Construct message content with image reference if present
       let messageContent = message || '';
       if (imagePathToSend) {
@@ -3397,7 +3473,7 @@
         }
         messageContent += `[Image: ${imagePathToSend}]`;
       }
-      
+
       ws.send(JSON.stringify({
         type: 'chat_send',
         sessionId: session.id,
@@ -3410,10 +3486,10 @@
     // Add typing/preparing indicator
     function addTypingIndicator() {
       removeTypingIndicator(); // Remove any existing
-      
+
       const container = document.getElementById('chatMessagesContainer');
       if (!container) return;
-      
+
       const indicator = document.createElement('div');
       indicator.id = 'typing-indicator';
       indicator.dataset.sessionId = activeChatSessionId;
@@ -3481,7 +3557,7 @@
     deleteChatSessionBtn?.addEventListener('click', () => {
       if (activeChatSessionId) deleteChatSession(activeChatSessionId);
     });
-    
+
     // ===========================
     // Mobile More Menu Toggle
     // ===========================
@@ -3489,7 +3565,7 @@
       document.querySelectorAll('.mobile-more-group.show, .chat-more-menu.show').forEach(g => g.classList.remove('show'));
       document.querySelectorAll('.mobile-more-btn.active, .btn-icon.active').forEach(b => b.classList.remove('active'));
     }
-    
+
     function toggleMobileMenu(btn, group) {
       const isOpen = group.classList.contains('show');
       closeAllMobileMenus();
@@ -3498,7 +3574,7 @@
         btn.classList.add('active');
       }
     }
-    
+
     document.getElementById('terminalMoreBtn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleMobileMenu(
@@ -3506,7 +3582,7 @@
         document.getElementById('terminalMoreGroup')
       );
     });
-    
+
     document.getElementById('chatMoreBtn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleMobileMenu(
@@ -3517,7 +3593,7 @@
 
     // Mobile chat menu button handlers - close menu after action
     document.getElementById('mbTestConnection')?.addEventListener('click', () => { closeAllMobileMenus(); testModelConnection(); });
-    document.getElementById('mbShowHistory')?.addEventListener('click', () => { closeAllMobileMenus(); 
+    document.getElementById('mbShowHistory')?.addEventListener('click', () => { closeAllMobileMenus();
       const panel = document.getElementById('sessionHistoryPanel');
       if (panel && panel.style.display === 'block') { hideSessionHistoryPanel(); } else { showSessionHistoryPanel(); }
     });
@@ -3525,14 +3601,14 @@
     document.getElementById('mbCloseAllSessions')?.addEventListener('click', () => { closeAllMobileMenus();
       showConfirmationModal('Close All Chat Sessions', 'Are you sure you want to close all chat sessions? This will delete all conversations.', () => { closeAllChatSessions(); });
     });
-    
+
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.mobile-more-btn') && !e.target.closest('.mobile-more-group') &&
           !e.target.closest('.btn-icon') && !e.target.closest('.chat-more-menu')) {
         closeAllMobileMenus();
       }
     });
-    
+
     // Show Chat History Button
     document.getElementById('showHistoryBtn')?.addEventListener('click', () => {
       const panel = document.getElementById('sessionHistoryPanel');
@@ -3554,19 +3630,19 @@
       );
     });
     sendChatBtn?.addEventListener('click', sendChatMessage);
-    
+
     chatInput?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendChatMessage();
       }
     });
-    
+
     chatInput?.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = Math.min(this.scrollHeight, 200) + 'px';
     });
-    
+
     // Auto-refresh model list when dropdown is clicked (to show newly downloaded models)
     chatModelSelect?.addEventListener('mousedown', async function() {
       console.log('🔄 Refreshing model list from Ollama...');
@@ -3575,7 +3651,7 @@
       await loadAvailableModels(currentProvider);
       await loadTtsVoices();
     });
-    
+
     // Also refresh when dropdown receives focus
     chatModelSelect?.addEventListener('focus', async function() {
       console.log('🔄 Refreshing model list on focus...');
@@ -3584,7 +3660,7 @@
       await loadAvailableModels(currentProvider);
       await loadTtsVoices();
     });
-    
+
     // Sync selected model to active session when user changes it
     chatModelSelect?.addEventListener('change', function() {
       const session = chatSessions.get(activeChatSessionId);
@@ -3609,37 +3685,37 @@
         }
       }
     });
-    
+
     // Sync selected agent engine to active session
-        
-        
+
+
     // Image Upload Event Listeners
     uploadImageBtn?.addEventListener('click', () => {
       imageUploadInput?.click();
     });
-    
+
     imageUploadInput?.addEventListener('change', handleImageUpload);
-    
+
     removeImageBtn?.addEventListener('click', clearImageUpload);
-    
+
     async function handleImageUpload(e) {
       const file = e.target.files?.[0];
       if (!file) return;
-      
+
       // Validate file is an image
       if (!file.type.startsWith('image/')) {
         showNotification('Please select an image file', 'error');
         return;
       }
-      
+
       // Validate file size (max 10MB)
       if (file.size > 10 * 1024 * 1024) {
         showNotification('Image file too large (max 10MB)', 'error');
         return;
       }
-      
+
       pendingImageFile = file;
-      
+
       // Show preview
       const reader = new FileReader();
       reader.onload = (event) => {
@@ -3654,25 +3730,25 @@
         }
       };
       reader.readAsDataURL(file);
-      
+
       // Upload image to server
       await uploadImageToServer(file);
     }
-    
+
     async function uploadImageToServer(file) {
       const session = chatSessions.get(activeChatSessionId);
       if (!session) {
         showNotification('Please select a chat session first', 'warning');
         return;
       }
-      
+
       // Get working directory from session or use current directory
       const workingDirectory = session.workingDirectory || currentPath;
-      
+
       const formData = new FormData();
       formData.append('image', file);
       formData.append('workingDirectory', workingDirectory);
-      
+
       try {
         const response = await fetch('/api/upload-image', {
           method: 'POST',
@@ -3681,14 +3757,14 @@
           },
           body: formData
         });
-        
+
         if (!response.ok) {
           throw new Error('Failed to upload image');
         }
-        
+
         const result = await response.json();
         pendingImagePath = result.imagePath;
-        
+
         showNotification('Image uploaded successfully', 'success');
       } catch (err) {
         console.error('Image upload error:', err);
@@ -3696,7 +3772,7 @@
         clearImageUpload();
       }
     }
-    
+
     function clearImageUpload() {
       pendingImageFile = null;
       pendingImagePath = null;
@@ -3725,7 +3801,7 @@
               clearTimeout(createdSession.initTimeout);
               createdSession.initTimeout = null;
             }
-            
+
             createdSession.serverSessionId = data.serverSessionId;
             createdSession.sdkSessionId = data.sdkSessionId;
             createdSession.agentEngine = 'pi-agent';
@@ -3747,7 +3823,7 @@
                 chatModelSelect.value = data.model;
               }
             }
-            
+
             // Remove any duplicate sessions with the same serverSessionId
             // CRITICAL: Don't remove sessions that have active streaming
             chatSessions.forEach((session, id) => {
@@ -3761,17 +3837,17 @@
                 chatSessions.delete(id);
               }
             });
-            
+
             // Re-save active session now that we have a stable serverSessionId
             if (activeChatSessionId === data.clientSessionId) {
               saveActiveChatSession(data.clientSessionId);
             }
-            
+
             // Store working directory if provided
             if (data.workingDirectory) {
               createdSession.workingDirectory = data.workingDirectory;
             }
-            
+
             if (data.history && data.history.length > 0) {
               createdSession.messages = data.history.map(msg => ({
                 role: msg.role,
@@ -3779,7 +3855,7 @@
                 timestamp: msg.timestamp || Date.now()
               }));
             }
-            
+
             if (activeChatSessionId === data.clientSessionId) {
               // CRITICAL: Skip ALL re-rendering if ANY stream is active
               if (streamingMessages.size > 0) {
@@ -3792,7 +3868,7 @@
                 updateChatStatus('online');
                 enableChatInput(true);
               }
-              
+
               // Show mode indicator
               const modeIndicator = document.getElementById('chatModeIndicator');
               if (modeIndicator) {
@@ -3800,7 +3876,7 @@
                 modeIndicator.textContent = 'Interactive Mode';
                 modeIndicator.className = 'mode-indicator interactive';
               }
-              
+
               // Show welcome message with working directory context
               // Only show for truly NEW sessions (no history), not reconnections
               if (data.workingDirectory && (!data.history || data.history.length === 0)) {
@@ -3814,12 +3890,12 @@
 
 📁 **Working Directory:** \`${data.workingDirectory}\`
 
-You can ask me anything about the code, request modifications, or upload images for analysis.`, 
+You can ask me anything about the code, request modifications, or upload images for analysis.`,
                       'assistant');
                   }, 100);
                 }
               }
-              
+
               // Send pending message if exists
               if (createdSession.pendingMessage || createdSession.pendingImagePath) {
                 let messageContent = createdSession.pendingMessage || '';
@@ -3829,7 +3905,7 @@ You can ask me anything about the code, request modifications, or upload images 
                   }
                   messageContent += `[Image: ${createdSession.pendingImagePath}]`;
                 }
-                
+
                 ws.send(JSON.stringify({
                   type: 'chat_send',
                   sessionId: createdSession.id,
@@ -3845,7 +3921,15 @@ You can ask me anything about the code, request modifications, or upload images 
             }
           }
           break;
-          
+
+        case 'chat_message_sent':
+          // Message was queued or sent
+          if (data.queued) {
+            // Show visual indicator that message is queued
+            showNotification('Message queued - will be sent after current response', 'info', null, 2000);
+          }
+          break;
+
         case 'chat_session_deleted':
           // Server confirmed deletion - session already removed from local map
           console.log(`Chat session deleted: ${data.clientSessionId}`);
@@ -3859,21 +3943,21 @@ You can ask me anything about the code, request modifications, or upload images 
               removeTypingIndicator(data.sessionId);
               break;
             }
-            
+
             // Remove typing indicator when response arrives
             removeTypingIndicator(data.sessionId);
-            
+
             const targetSession = Array.from(chatSessions.values())
               .find(s => s.serverSessionId === data.sessionId || s.id === data.sessionId);
-            
+
             console.log('[chat_message] assistant msg for', data.sessionId, 'content:', data.content.substring(0, 40));
-            
+
             if (targetSession) {
               if (!Array.isArray(targetSession.messages)) targetSession.messages = [];
               // Prevent duplicate history entries if the last message already matches
               const lastMsg = targetSession.messages[targetSession.messages.length - 1];
               const isDuplicate = lastMsg && lastMsg.role === 'assistant' && lastMsg.content === data.content;
-              
+
               if (!isDuplicate) {
                 targetSession.messages.push({
                   role: 'assistant',
@@ -3881,17 +3965,17 @@ You can ask me anything about the code, request modifications, or upload images 
                   timestamp: Date.now()
                 });
               }
-              
+
               if (targetSession.id === activeChatSessionId) {
                 // Check if stream just completed - if so, the message is already displayed
-                const streamJustCompleted = targetSession._lastStreamCompleteTime && 
+                const streamJustCompleted = targetSession._lastStreamCompleteTime &&
                   (Date.now() - targetSession._lastStreamCompleteTime) < 1000;
-                
+
                 if (streamJustCompleted) {
                   console.log('[chat_message] Stream just completed, skipping duplicate render');
                   break;
                 }
-                
+
                 // Check if we have an active streaming bubble for this session
                 const streamEl = streamingMessages.get(data.sessionId);
                 if (streamEl) {
@@ -3904,7 +3988,7 @@ You can ask me anything about the code, request modifications, or upload images 
                   streamEl.classList.remove('streaming');
                   streamingMessages.delete(data.sessionId);
                 } else {
-                  // No streaming bubble — check if the last assistant bubble in the DOM
+                  // No streaming bubble - check if the last assistant bubble in the DOM
                   // was just finalized and needs its content updated instead of creating a duplicate
                   const container = document.getElementById('chatMessagesContainer');
                   const lastBubble = container ? container.querySelector('.chat-message.assistant:last-child') : null;
@@ -3913,7 +3997,7 @@ You can ask me anything about the code, request modifications, or upload images 
                   const isRecent = lastBubble && (Date.now() - (lastBubble.dataset.timestamp || 0) < 2000);
                   // If the last bubble is very recent and already has the same text, skip creating a duplicate
                   if (isDuplicate || (isRecent && lastText === data.content)) {
-                    // Skip — already present in history or DOM
+                    // Skip - already present in history or DOM
                   } else if (lastBubble && isRecent && lastText !== data.content) {
                     // Last bubble is recent but content differs (e.g. accumulated deltas vs final)
                     // Update the existing bubble instead of creating a new one
@@ -3951,7 +4035,7 @@ You can ask me anything about the code, request modifications, or upload images 
           // Remove typing indicator on error
           removeTypingIndicator();
           decrementAgentWork();
-          
+
           // Clear any pending initialization timeouts
           chatSessions.forEach(session => {
             if (session.initTimeout) {
@@ -3959,7 +4043,7 @@ You can ask me anything about the code, request modifications, or upload images 
               session.initTimeout = null;
             }
           });
-          
+
           // Check for limit-related errors and show as a friendly bubble
           const lowerMsg = (data.message || '').toLowerCase();
           const isLimit = lowerMsg.includes('too many requests') ||
@@ -3974,7 +4058,7 @@ You can ask me anything about the code, request modifications, or upload images 
           }
 
           showChatError(data.message || 'Chat error occurred');
-          
+
           // Don't permanently disable input for all errors.
           // Only hard-disable for auth/connection errors. For transient errors
           // (rate limits, timeouts, provider hiccups), allow retry after a short delay.
@@ -3983,12 +4067,12 @@ You can ask me anything about the code, request modifications, or upload images 
                               lowerErrMsg.includes('not connected') ||
                               lowerErrMsg.includes('not initialized') ||
                               lowerErrMsg.includes('failed to initialize');
-          
+
           if (isHardError) {
             updateChatStatus('offline');
             enableChatInput(false);
           } else {
-            // Transient error — show offline briefly then auto-recover
+            // Transient error - show offline briefly then auto-recover
             updateChatStatus('offline');
             enableChatInput(false);
             setTimeout(() => {
@@ -3997,35 +4081,35 @@ You can ask me anything about the code, request modifications, or upload images 
             }, 3000);
           }
           break;
-          
+
         case 'permission_request':
           handlePermissionRequest(data);
           break;
-          
+
         case 'user_input_request':
           handleUserInputRequest(data);
           break;
-          
+
         case 'command_result':
           handleCommandResult(data);
           break;
-          
+
         case 'tool_start':
           handleToolStart(data);
           break;
-          
+
         case 'tool_progress':
           handleToolProgress(data);
           break;
-          
+
         case 'tool_complete':
           handleToolComplete(data);
           break;
-          
+
         case 'mode_changed':
           handleModeChanged(data);
           break;
-          
+
         case 'chat_stream_delta':
           handleStreamDelta(data);
           break;
@@ -4038,27 +4122,35 @@ You can ask me anything about the code, request modifications, or upload images 
           // Legacy completion event - treat same as stream complete
           handleStreamComplete(data);
           break;
-          
+
         case 'chat_reasoning':
           handleReasoning(data);
           break;
-          
+
         case 'chat_reasoning_delta':
           handleReasoningDelta(data);
           break;
-          
+
         case 'plan_update':
           handlePlanUpdate(data);
           break;
-          
+
+        case 'agent_status':
+          handleAgentStatus(data);
+          break;
+
+        case 'agent_thinking':
+          handleAgentThinking(data);
+          break;
+
         case 'interrupt_success':
           showNotification('Operation interrupted', 'info');
           break;
-          
+
         case 'session_info':
           console.log('Session info received:', data);
           break;
-          
+
         case 'session_resumed':
           handleSessionResumed(data);
           break;
@@ -4080,25 +4172,25 @@ You can ask me anything about the code, request modifications, or upload images 
     // ===============================
     // Modern Notification System
     // ===============================
-    
+
     function showNotification(message, type = 'info', title = null, duration = 5000) {
       const container = document.getElementById('notificationContainer');
       if (!container) return;
-      
+
       const icons = {
         success: '✅',
         error: '❌',
         warning: '⚠️',
-        info: 'ℹ️'
+        info: 'i️'
       };
-      
+
       const titles = {
         success: 'Success',
         error: 'Error',
         warning: 'Warning',
         info: 'Info'
       };
-      
+
       const notification = document.createElement('div');
       notification.className = `notification ${type}`;
       notification.innerHTML = `
@@ -4109,9 +4201,9 @@ You can ask me anything about the code, request modifications, or upload images 
         </div>
         <button class="notification-close" onclick="this.parentElement.remove()">&times;</button>
       `;
-      
+
       container.appendChild(notification);
-      
+
       // Auto remove after duration
       if (duration > 0) {
         setTimeout(() => {
@@ -4119,23 +4211,23 @@ You can ask me anything about the code, request modifications, or upload images 
           setTimeout(() => notification.remove(), 300);
         }, duration);
       }
-      
+
       return notification;
     }
-    
+
     // ===============================
     // Modern Confirmation Modal
     // ===============================
-    
+
     let confirmModalResolve = null;
-    
+
     function showConfirmationModal(title, message, onConfirm, onCancel = null) {
       const modal = document.getElementById('confirmModal');
       const titleEl = document.getElementById('confirmModalTitle');
       const messageEl = document.getElementById('confirmModalMessage');
       const confirmBtn = document.getElementById('confirmModalConfirm');
       const cancelBtn = document.getElementById('confirmModalCancel');
-      
+
       if (!modal || !titleEl || !messageEl || !confirmBtn || !cancelBtn) {
         // Fallback to browser confirm if modal not found
         if (confirm(message)) {
@@ -4145,69 +4237,69 @@ You can ask me anything about the code, request modifications, or upload images 
         }
         return;
       }
-      
+
       titleEl.textContent = title;
       messageEl.textContent = message;
-      
+
       // Store callbacks
       confirmModalResolve = { confirm: onConfirm, cancel: onCancel };
-      
+
       // Show modal
       modal.classList.add('show');
-      
+
       // Handle confirm
       const handleConfirm = () => {
         modal.classList.remove('show');
         confirmModalResolve?.confirm?.();
         cleanup();
       };
-      
+
       // Handle cancel
       const handleCancel = () => {
         modal.classList.remove('show');
         confirmModalResolve?.cancel?.();
         cleanup();
       };
-      
+
       // Cleanup function
       const cleanup = () => {
         confirmBtn.removeEventListener('click', handleConfirm);
         cancelBtn.removeEventListener('click', handleCancel);
         modal.removeEventListener('click', handleOverlayClick);
       };
-      
+
       // Handle overlay click
       const handleOverlayClick = (e) => {
         if (e.target === modal) {
           handleCancel();
         }
       };
-      
+
       confirmBtn.addEventListener('click', handleConfirm);
       cancelBtn.addEventListener('click', handleCancel);
       modal.addEventListener('click', handleOverlayClick);
     }
-    
+
     // ===============================
     // Close All Chat Sessions
     // ===============================
-    
+
     async function closeAllChatSessions() {
       const sessionsToDelete = Array.from(chatSessions.keys());
-      
+
       if (sessionsToDelete.length === 0) {
         showNotification('No chat sessions to close', 'info');
         return;
       }
-      
+
       let successCount = 0;
       let errorCount = 0;
-      
+
       // Delete all sessions
       for (const sessionId of sessionsToDelete) {
         try {
           const session = chatSessions.get(sessionId);
-          
+
           // Send delete request to server
           if (ws?.readyState === WebSocket.OPEN && session?.serverSessionId) {
             ws.send(JSON.stringify({
@@ -4216,7 +4308,7 @@ You can ask me anything about the code, request modifications, or upload images 
               serverSessionId: session.serverSessionId
             }));
           }
-          
+
           // Remove from local map
           chatSessions.delete(sessionId);
           successCount++;
@@ -4225,14 +4317,14 @@ You can ask me anything about the code, request modifications, or upload images 
           errorCount++;
         }
       }
-      
+
       // Reset active session
       activeChatSessionId = null;
-      
+
       // Update UI
       renderChatTabs();
       showEmptyChatState();
-      
+
       // Show notification
       if (errorCount === 0) {
         showNotification(`Closed ${successCount} chat session${successCount !== 1 ? 's' : ''}`, 'success');
@@ -4240,32 +4332,32 @@ You can ask me anything about the code, request modifications, or upload images 
         showNotification(`Closed ${successCount} sessions, ${errorCount} failed`, 'warning');
       }
     }
-    
+
     // ===============================
     // Chat Tab Context Menu
     // ===============================
-    
+
     function showChatTabContextMenu(event, sessionId) {
       // Remove any existing context menu
       const existingMenu = document.getElementById('chatTabContextMenu');
       if (existingMenu) {
         existingMenu.remove();
       }
-      
+
       const session = chatSessions.get(sessionId);
       if (!session) return;
-      
+
       // Create context menu
       const menu = document.createElement('div');
       menu.id = 'chatTabContextMenu';
       menu.className = 'context-menu';
-      
+
       // Compute initial position
       let menuTop = event.clientY;
       let menuLeft = event.clientX;
       menu.style.top = `${menuTop}px`;
       menu.style.left = `${menuLeft}px`;
-      
+
       // Build header with session name and working directory
       const headerHtml = session.workingDirectory
         ? `<div class="context-menu-header">
@@ -4273,7 +4365,7 @@ You can ask me anything about the code, request modifications, or upload images 
             <div class="context-menu-header-path">📁 ${escapeHtml(session.workingDirectory)}</div>
            </div>`
         : '';
-      
+
       menu.innerHTML = `
         ${headerHtml}
         <div class="context-menu-item" data-action="rename">
@@ -4290,15 +4382,15 @@ You can ask me anything about the code, request modifications, or upload images 
           <span>🗑️</span> Close All Sessions
         </div>
       `;
-      
+
       // Handle menu item clicks
       menu.addEventListener('click', (e) => {
         const item = e.target.closest('.context-menu-item');
         if (!item) return;
-        
+
         const action = item.dataset.action;
         menu.remove();
-        
+
         switch (action) {
           case 'rename':
             renameChatSession();
@@ -4321,7 +4413,7 @@ You can ask me anything about the code, request modifications, or upload images 
             break;
         }
       });
-      
+
       // Close menu when clicking outside
       const closeMenu = (e) => {
         if (!menu.contains(e.target)) {
@@ -4330,9 +4422,9 @@ You can ask me anything about the code, request modifications, or upload images 
           document.removeEventListener('scroll', closeMenu);
         }
       };
-      
+
       document.body.appendChild(menu);
-      
+
       // Adjust position if menu goes off screen
       const rect = menu.getBoundingClientRect();
       if (rect.right > window.innerWidth - 8) {
@@ -4345,24 +4437,24 @@ You can ask me anything about the code, request modifications, or upload images 
       if (menuTop < 8) menuTop = 8;
       menu.style.top = `${menuTop}px`;
       menu.style.left = `${menuLeft}px`;
-      
+
       // Delay adding click listener to avoid immediate close
       setTimeout(() => {
         document.addEventListener('click', closeMenu);
         document.addEventListener('scroll', closeMenu);
       }, 100);
     }
-    
+
     // ===============================
     // Permission Request Handler
     // ===============================
-    
+
     function handlePermissionRequest(data) {
       const { requestId, permission, description } = data;
-      
+
       // Close any existing permission modals to prevent duplicates
       document.querySelectorAll('.permission-modal').forEach(m => m.remove());
-      
+
       // Create permission request modal
       const modal = document.createElement('div');
       modal.className = 'permission-modal';
@@ -4382,15 +4474,15 @@ You can ask me anything about the code, request modifications, or upload images 
           </div>
         </div>
       `;
-      
+
       document.body.appendChild(modal);
-      
+
       const closeModal = () => {
         if (modal && modal.parentNode) {
           modal.remove();
         }
       };
-      
+
       // ESC key to close
       const escHandler = (e) => {
         if (e.key === 'Escape') {
@@ -4406,7 +4498,7 @@ You can ask me anything about the code, request modifications, or upload images 
         }
       };
       document.addEventListener('keydown', escHandler);
-      
+
       // Click outside content to close
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
@@ -4421,7 +4513,7 @@ You can ask me anything about the code, request modifications, or upload images 
           document.removeEventListener('keydown', escHandler);
         }
       });
-      
+
       // Handle button clicks
       modal.querySelector('.permission-approve').addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -4434,7 +4526,7 @@ You can ask me anything about the code, request modifications, or upload images 
         closeModal();
         document.removeEventListener('keydown', escHandler);
       });
-      
+
       modal.querySelector('.permission-deny').addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
@@ -4447,14 +4539,14 @@ You can ask me anything about the code, request modifications, or upload images 
         document.removeEventListener('keydown', escHandler);
       });
     }
-    
+
     // ===============================
     // User Input Request Handler
     // ===============================
-    
+
     function handleUserInputRequest(data) {
       const { requestId, prompt, placeholder } = data;
-      
+
       // Create user input modal
       const modal = document.createElement('div');
       modal.className = 'user-input-modal';
@@ -4474,12 +4566,12 @@ You can ask me anything about the code, request modifications, or upload images 
           </div>
         </div>
       `;
-      
+
       document.body.appendChild(modal);
-      
+
       const inputField = modal.querySelector('.user-input-field');
       inputField.focus();
-      
+
       // Handle submit
       const submit = () => {
         const value = inputField.value.trim();
@@ -4492,7 +4584,7 @@ You can ask me anything about the code, request modifications, or upload images 
         }
         modal.remove();
       };
-      
+
       modal.querySelector('.user-input-submit').addEventListener('click', submit);
       inputField.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -4500,7 +4592,7 @@ You can ask me anything about the code, request modifications, or upload images 
           submit();
         }
       });
-      
+
       modal.querySelector('.user-input-cancel').addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
@@ -4512,23 +4604,23 @@ You can ask me anything about the code, request modifications, or upload images 
         modal.remove();
       });
     }
-    
+
     // ===============================
     // Command Result Handler
     // ===============================
-    
+
     function handleCommandResult(data) {
       const { command, success, message } = data;
-      
+
       const statusType = success ? 'success' : 'error';
       const icon = success ? '✅' : '❌';
-      
+
       // Remove any pending command indicators
       const container = document.getElementById('chatMessagesContainer');
       if (container) {
         container.querySelectorAll('.chat-message.system.pending-command').forEach(el => el.remove());
       }
-      
+
       // Add command result to chat
       if (container) {
         const div = document.createElement('div');
@@ -4543,7 +4635,7 @@ You can ask me anything about the code, request modifications, or upload images 
         container.appendChild(div);
         scrollToBottom();
       }
-      
+
       // Persist result in session history so it survives re-renders
       const session = chatSessions.get(activeChatSessionId);
       if (session) {
@@ -4553,20 +4645,20 @@ You can ask me anything about the code, request modifications, or upload images 
           timestamp: Date.now()
         });
       }
-      
+
       // Also show notification
       showNotification(message, statusType, command);
     }
-    
+
     // ===============================
     // Tool Execution Handlers
     // ===============================
-    
+
     const activeTools = new Map();
-    
+
     function handleToolStart(data) {
       const { toolId, name, description } = data;
-      
+
       // Create tool execution indicator
       const container = document.getElementById('chatMessagesContainer');
       if (container) {
@@ -4584,14 +4676,14 @@ You can ask me anything about the code, request modifications, or upload images 
         `;
         container.appendChild(div);
         scrollToBottom();
-        
+
         activeTools.set(toolId, { name, description, element: div });
       }
     }
-    
+
     function handleToolComplete(data) {
       const { toolId, result, success } = data;
-      
+
       const toolData = activeTools.get(toolId);
       if (toolData) {
         const element = toolData.element;
@@ -4614,10 +4706,10 @@ You can ask me anything about the code, request modifications, or upload images 
         activeTools.delete(toolId);
       }
     }
-    
+
     function handleToolProgress(data) {
       const { toolId, progress } = data;
-      
+
       const toolData = activeTools.get(toolId);
       if (toolData && toolData.element) {
         const progressEl = toolData.element.querySelector('.tool-description');
@@ -4626,47 +4718,136 @@ You can ask me anything about the code, request modifications, or upload images 
         }
       }
     }
-    
+
+    // ===============================
+    // Agent Status Handler (TUI-like activity display)
+    // ===============================
+
+    // Track current agent activity per session
+    const agentActivityMessages = new Map();
+
+    function handleAgentStatus(data) {
+      const { sessionId, status, message } = data;
+      
+      // Only show for active session
+      if (sessionId !== activeChatSessionId) return;
+      
+      const container = document.getElementById('chatMessagesContainer');
+      if (!container) return;
+
+      // Find or create agent activity indicator
+      let activityEl = document.getElementById(`agent-activity-${sessionId}`);
+      
+      if (!activityEl) {
+        activityEl = document.createElement('div');
+        activityEl.className = 'chat-message agent-activity';
+        activityEl.id = `agent-activity-${sessionId}`;
+        container.appendChild(activityEl);
+        scrollToBottom();
+      }
+
+      // Update the activity message
+      activityEl.innerHTML = `
+        <div class="agent-activity-indicator">
+          <span class="agent-spinner">⚙️</span>
+          <span class="agent-status-text">${escapeHtml(message || 'Agent is working...')}</span>
+        </div>
+      `;
+
+      agentActivityMessages.set(sessionId, { element: activityEl, message });
+    }
+
+    function handleAgentThinking(data) {
+      const { sessionId, delta } = data;
+      
+      // Only show for active session and if we have content
+      if (sessionId !== activeChatSessionId || !delta) return;
+      
+      const container = document.getElementById('chatMessagesContainer');
+      if (!container) return;
+
+      // Find or create thinking indicator
+      let thinkingEl = document.getElementById(`agent-thinking-${sessionId}`);
+      
+      if (!thinkingEl) {
+        thinkingEl = document.createElement('div');
+        thinkingEl.className = 'chat-message agent-thinking';
+        thinkingEl.id = `agent-thinking-${sessionId}`;
+        container.appendChild(thinkingEl);
+        scrollToBottom();
+      }
+
+      // Accumulate thinking text
+      const currentText = thinkingEl.dataset.thinkingText || '';
+      const newText = currentText + delta;
+      thinkingEl.dataset.thinkingText = newText;
+
+      // Show latest thinking with collapse for long content
+      const lines = newText.split('\n').filter(l => l.trim());
+      const displayText = lines.slice(-3).join('\n'); // Show last 3 lines
+      
+      thinkingEl.innerHTML = `
+        <div class="agent-thinking-indicator">
+          <span class="thinking-label">🤔 Thinking:</span>
+          <span class="thinking-content">${escapeHtml(displayText)}</span>
+          ${lines.length > 3 ? `<span class="thinking-more">+${lines.length - 3} more lines</span>` : ''}
+        </div>
+      `;
+    }
+
+    // Clean up agent activity when stream completes
+    function removeAgentActivity(sessionId) {
+      const activityEl = document.getElementById(`agent-activity-${sessionId}`);
+      if (activityEl) {
+        activityEl.remove();
+      }
+      const thinkingEl = document.getElementById(`agent-thinking-${sessionId}`);
+      if (thinkingEl) {
+        thinkingEl.remove();
+      }
+      agentActivityMessages.delete(sessionId);
+    }
+
     // ===============================
     // Mode Change Handler
     // ===============================
-    
+
     function handleModeChanged(data) {
       const { mode } = data;
-      
+
       // Update mode indicator
       const modeIndicator = document.getElementById('chatModeIndicator');
       if (modeIndicator) {
         modeIndicator.textContent = mode.charAt(0).toUpperCase() + mode.slice(1) + ' Mode';
         modeIndicator.className = `mode-indicator ${mode}`;
       }
-      
+
       showNotification(`Switched to ${mode} mode`, 'info');
     }
-    
+
     // ===============================
     // Streaming Message Handler
     // ===============================
-    
+
     // Track streaming message elements per server session to prevent
     // duplicate bubbles and support multi-tab streaming.
     const streamingMessages = new Map();
-    
+
     function handleStreamDelta(data) {
       const { delta, sessionId } = data;
-      
-      // Do NOT remove typing indicator here — it must stay visible until the stream
+
+      // Do NOT remove typing indicator here - it must stay visible until the stream
       // is fully complete so the user always knows the agent is still working.
-      
+
       let streamEl = streamingMessages.get(sessionId);
       const container = document.getElementById('chatMessagesContainer');
-      
+
       // If we have a tracked stream element but it's detached from the DOM,
       // re-attach it so the user can see it (only for the active session)
       if (streamEl && !streamEl.parentNode && container && sessionId === activeChatSessionId) {
         container.appendChild(streamEl);
       }
-      
+
       if (!streamEl) {
         if (container) {
           // Check if there's already a streaming bubble in the DOM for this session
@@ -4703,7 +4884,7 @@ You can ask me anything about the code, request modifications, or upload images 
           }
         }
       }
-      
+
       // Append delta (element may be detached if user switched tabs)
       let content = streamEl?.querySelector('.message-content');
       if (!content && streamEl) {
@@ -4787,23 +4968,26 @@ You can ask me anything about the code, request modifications, or upload images 
         }
       }
       streamingMessages.delete(sessionId);
-      
+
+      // Clean up agent activity indicators
+      removeAgentActivity(sessionId);
+
       // Mark this session as recently completed a stream to prevent race condition re-renders
       if (targetSession) {
         targetSession._lastStreamCompleteTime = Date.now();
       }
-      
+
       console.log('[stream] complete for', sessionId, 'finalText:', finalText.substring(0, 40));
       scrollToBottom();
-      
+
       // Re-enable input and set status to online so user can continue the conversation
       updateChatStatus('online');
       enableChatInput(true);
     }
-    
+
     function handleReasoning(data) {
       const { content } = data;
-      
+
       // Add reasoning in a collapsible section
       const container = document.getElementById('chatMessagesContainer');
       if (container) {
@@ -4819,10 +5003,10 @@ You can ask me anything about the code, request modifications, or upload images 
         scrollToBottom();
       }
     }
-    
+
     function handleReasoningDelta(data) {
       const { content } = data;
-      
+
       // Find existing reasoning block or create one
       const container = document.getElementById('chatMessagesContainer');
       if (container) {
@@ -4838,7 +5022,7 @@ You can ask me anything about the code, request modifications, or upload images 
           `;
           container.appendChild(reasoningDiv);
         }
-        
+
         const contentDiv = reasoningDiv.querySelector('.reasoning-content');
         if (contentDiv) {
           contentDiv.textContent += content;
@@ -4846,16 +5030,16 @@ You can ask me anything about the code, request modifications, or upload images 
         scrollToBottom();
       }
     }
-    
+
     // ===============================
     // Plan Update Handler
     // ===============================
-    
+
     function handlePlanUpdate(data) {
       const { plan, action } = data;
-      
+
       let planContainer = document.getElementById('chatPlanContainer');
-      
+
       if (!planContainer) {
         // Create plan container
         const container = document.getElementById('chatMessagesContainer');
@@ -4866,7 +5050,7 @@ You can ask me anything about the code, request modifications, or upload images 
           container.appendChild(planContainer);
         }
       }
-      
+
       if (planContainer) {
         planContainer.innerHTML = `
           <div class="plan-header">
@@ -4879,7 +5063,7 @@ You can ask me anything about the code, request modifications, or upload images 
         scrollToBottom();
       }
     }
-    
+
     function formatPlan(plan) {
       if (typeof plan === 'string') return plan;
       if (Array.isArray(plan)) {
@@ -4890,24 +5074,24 @@ You can ask me anything about the code, request modifications, or upload images 
       }
       return String(plan);
     }
-    
+
     // ===============================
     // Token Usage Handler
     // ===============================
-    
+
     function handleTokenUsageUpdate(data) {
       const { sessionId, cumulative } = data;
       if (!cumulative) return;
-      
+
       // Find the session by serverSessionId
       let session = Array.from(chatSessions.values())
         .find(s => s.serverSessionId === sessionId);
-      
+
       // Fallback: update the active session if serverSessionId is not yet set or no match
       if (!session && activeChatSessionId) {
         session = chatSessions.get(activeChatSessionId);
       }
-      
+
       if (session) {
         // Update cumulative token counts in session
         session.totalInputTokens = cumulative.inputTokens || 0;
@@ -4917,24 +5101,24 @@ You can ask me anything about the code, request modifications, or upload images 
         session.totalCacheWriteTokens = cumulative.cacheWriteTokens || 0;
         session.totalReasoningTokens = cumulative.reasoningTokens || 0;
       }
-      
+
       // Update UI if this is the active session (match by serverSessionId or fallback)
       const activeSession = activeChatSessionId ? chatSessions.get(activeChatSessionId) : null;
       if (activeSession && (!activeSession.serverSessionId || activeSession.serverSessionId === sessionId)) {
         updateTokenCounterDisplay(cumulative);
       }
     }
-    
+
     function updateTokenCounterDisplay(cumulative) {
       const tokenIn = document.getElementById('tokenIn');
       const tokenOut = document.getElementById('tokenOut');
       const tokenTotal = document.getElementById('tokenTotal');
       const tokenCounter = document.getElementById('tokenCounter');
-      
+
       if (tokenIn) tokenIn.textContent = formatTokenCount(cumulative?.inputTokens);
       if (tokenOut) tokenOut.textContent = formatTokenCount(cumulative?.outputTokens);
       if (tokenTotal) tokenTotal.textContent = formatTokenCount(cumulative?.totalTokens);
-      
+
       if (tokenCounter) {
         tokenCounter.style.display = 'inline-flex';
         // Highlight animation when tokens update
@@ -4942,48 +5126,48 @@ You can ask me anything about the code, request modifications, or upload images 
         setTimeout(() => tokenCounter.classList.remove('token-updated'), 300);
       }
     }
-    
+
     function formatTokenCount(num) {
       if (num == null || isNaN(num)) return '0';
       if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
       if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
       return num.toString();
     }
-    
+
     // ===============================
     // Session Resume Handler
     // ===============================
-    
+
     function handleSessionResumed(data) {
       const { success, sdkSessionId, sessionId, history, message } = data;
-      
+
       if (success) {
         showNotification('Session resumed successfully', 'success');
-        
+
         // Update session data
         const session = chatSessions.get(activeChatSessionId);
         if (session) {
           session.serverSessionId = sessionId;
           session.sdkSessionId = sdkSessionId;
           session.initialized = true;
-                    
+
           if (history && history.length > 0) {
             session.messages = history;
             renderChatMessages(session);
           }
         }
-        
+
         updateChatStatus('online');
         enableChatInput(true);
       } else {
         showNotification(message || 'Failed to resume session', 'error');
       }
     }
-    
+
     // ===============================
     // Command Functions
     // ===============================
-    
+
     function sendChatCommand(command) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
@@ -4995,7 +5179,7 @@ You can ask me anything about the code, request modifications, or upload images 
         showNotification('Cannot send command: not connected', 'error');
       }
     }
-    
+
     function sendInterrupt() {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
@@ -5005,17 +5189,17 @@ You can ask me anything about the code, request modifications, or upload images 
       }
       resetAgentWorkingIndicator();
     }
-    
+
     // ===============================
     // Command Input Handler
     // ===============================
-    
+
     function processCommandInput(input) {
       // Check if input starts with /
       if (input.startsWith('/')) {
         const parts = input.trim().split(/\s+/);
         const command = parts[0].toLowerCase();
-        
+
         // Show temporary acknowledgment that command is being processed
         const container = document.getElementById('chatMessagesContainer');
         if (container) {
@@ -5026,20 +5210,20 @@ You can ask me anything about the code, request modifications, or upload images 
           container.appendChild(div);
           scrollToBottom();
         }
-        
+
         // Send as command
         sendChatCommand(command);
         return true;
       }
-      
+
       return false;
     }
-    
+
     // Update sendChatMessage to check for commands
     const originalSendChatMessage = sendChatMessage;
     sendChatMessage = function() {
       const input = chatInput?.value?.trim();
-      
+
       if (input?.startsWith('/')) {
         // Process as command
         processCommandInput(input);
@@ -5047,17 +5231,17 @@ You can ask me anything about the code, request modifications, or upload images 
         chatInput.style.height = 'auto';
         return;
       }
-      
+
       // Call original function
       originalSendChatMessage();
     };
-    
+
     // Re-bind send button to use the overridden function
     if (sendChatBtn) {
       sendChatBtn.removeEventListener('click', originalSendChatMessage);
       sendChatBtn.addEventListener('click', sendChatMessage);
     }
-    
+
     // Make functions globally available
     window.handlePermissionRequest = handlePermissionRequest;
     window.handleUserInputRequest = handleUserInputRequest;
@@ -5067,20 +5251,20 @@ You can ask me anything about the code, request modifications, or upload images 
     window.hideSessionHistoryPanel = hideSessionHistoryPanel;
     window.resumeChatSession = resumeChatSession;
     window.loadSessionHistory = loadSessionHistory;
-    
+
     // ===============================
     // Session History and Resume
     // ===============================
-    
+
     let sessionHistory = [];
     let sessionHistoryLoaded = false;
-    
+
     async function loadSessionHistory() {
       try {
         const response = await fetch('/api/chat/sessions?limit=20', {
           headers: { 'Authorization': `Bearer ${authToken}` }
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           sessionHistory = data.sessions || [];
@@ -5092,12 +5276,12 @@ You can ask me anything about the code, request modifications, or upload images 
       }
       return [];
     }
-    
+
     async function resumeChatSession(sessionId) {
       try {
         showNotification('Connecting...', 'info');
         updateChatStatus('connecting');
-        
+
         const response = await fetch(`/api/chat/sessions/${sessionId}/resume`, {
           method: 'POST',
           headers: {
@@ -5106,10 +5290,10 @@ You can ask me anything about the code, request modifications, or upload images 
           },
           body: JSON.stringify({})
         });
-        
+
         if (response.ok) {
           const data = await response.json();
-          
+
           // Find or create client session
           let clientSessionId = null;
           for (const [cid, session] of chatSessions) {
@@ -5118,7 +5302,7 @@ You can ask me anything about the code, request modifications, or upload images 
               break;
             }
           }
-          
+
           if (!clientSessionId) {
             clientSessionId = `chat_${sessionId}`;
             chatSessions.set(clientSessionId, {
@@ -5131,16 +5315,16 @@ You can ask me anything about the code, request modifications, or upload images 
               sdkSessionId: data.sdkSessionId
             });
           }
-          
+
           const session = chatSessions.get(clientSessionId);
           session.messages = data.history || [];
           session.sdkSessionId = data.sdkSessionId;
           session.initialized = true;
-          
+
           selectChatSession(clientSessionId);
           hideChatError();
           updateChatStatus('online');
-          
+
           showNotification('Session resumed successfully', 'success');
           return true;
         } else {
@@ -5156,11 +5340,11 @@ You can ask me anything about the code, request modifications, or upload images 
         return false;
       }
     }
-    
+
     function showSessionHistoryPanel() {
       // Create or show session history panel
       let panel = document.getElementById('sessionHistoryPanel');
-      
+
       if (!panel) {
         panel = document.createElement('div');
         panel.id = 'sessionHistoryPanel';
@@ -5174,29 +5358,29 @@ You can ask me anything about the code, request modifications, or upload images 
             <div class="session-history-empty">Loading...</div>
           </div>
         `;
-        
+
         // Insert after chat tabs
         const chatTabs = document.getElementById('chatTabs');
         chatTabs.parentNode.insertBefore(panel, chatTabs.nextSibling);
       }
-      
+
       panel.style.display = 'block';
       loadAndRenderSessionHistory();
     }
-    
+
     async function loadAndRenderSessionHistory() {
       const list = document.getElementById('sessionHistoryList');
       if (!list) return;
-      
+
       list.innerHTML = '<div class="session-history-empty">Loading...</div>';
-      
+
       const sessions = await loadSessionHistory();
-      
+
       if (sessions.length === 0) {
         list.innerHTML = '<div class="session-history-empty">No previous sessions</div>';
         return;
       }
-      
+
       list.innerHTML = sessions.map(session => `
         <div class="session-history-item ${session.isActive ? 'active' : ''}" data-session-id="${session.serverSessionId}">
           <div class="session-history-header">
@@ -5218,7 +5402,7 @@ You can ask me anything about the code, request modifications, or upload images 
           </div>
         </div>
       `).join('');
-      
+
       // Add click handlers
       list.querySelectorAll('.resume-session-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -5228,7 +5412,7 @@ You can ask me anything about the code, request modifications, or upload images 
           hideSessionHistoryPanel();
         });
       });
-      
+
       list.querySelectorAll('.view-session-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -5237,27 +5421,27 @@ You can ask me anything about the code, request modifications, or upload images 
         });
       });
     }
-    
+
     function hideSessionHistoryPanel() {
       const panel = document.getElementById('sessionHistoryPanel');
       if (panel) {
         panel.style.display = 'none';
       }
     }
-    
+
     async function viewSessionMessages(sessionId) {
       try {
         const response = await fetch(`/api/chat/sessions/${sessionId}`, {
           headers: { 'Authorization': `Bearer ${authToken}` }
         });
-        
+
         if (response.ok) {
           const data = await response.json();
-          
+
           // Show messages in a modal or dedicated view
           const messages = data.session?.messages || [];
           const container = document.getElementById('chatMessagesContainer');
-          
+
           if (container && messages.length > 0) {
             container.innerHTML = '';
             messages.forEach(msg => {
@@ -5265,7 +5449,7 @@ You can ask me anything about the code, request modifications, or upload images 
             });
             scrollToBottom();
           }
-          
+
           showNotification(`Loaded ${messages.length} messages`, 'info');
         }
       } catch (err) {
@@ -5273,32 +5457,32 @@ You can ask me anything about the code, request modifications, or upload images 
         showNotification('Failed to load session', 'error');
       }
     }
-    
+
     function formatRelativeTime(timestamp) {
       if (!timestamp) return 'Unknown';
-      
+
       const date = new Date(timestamp);
       const now = new Date();
       const diff = now - date;
-      
+
       const minutes = Math.floor(diff / 60000);
       const hours = Math.floor(diff / 3600000);
       const days = Math.floor(diff / 86400000);
-      
+
       if (minutes < 1) return 'Just now';
       if (minutes < 60) return `${minutes}m ago`;
       if (hours < 24) return `${hours}h ago`;
       if (days < 7) return `${days}d ago`;
-      
+
       return date.toLocaleDateString();
     }
-    
+
     // ===============================
     // Command Hints Handling
     // ===============================
-    
+
     const chatCommandHints = document.getElementById('chatCommandHints');
-    
+
     // Show command hints when typing "/"
     chatInput?.addEventListener('input', (e) => {
       const value = e.target.value;
@@ -5308,7 +5492,7 @@ You can ask me anything about the code, request modifications, or upload images 
         chatCommandHints.style.display = 'none';
       }
     });
-    
+
     // Handle click on command hints
     chatCommandHints?.addEventListener('click', (e) => {
       const hint = e.target.closest('.hint-item');
@@ -5345,4 +5529,12 @@ You can ask me anything about the code, request modifications, or upload images 
     window.showConfirmationModal = showConfirmationModal;
 
     // Initialize
+    // Hide sidebar toggle initially until user logs in
+    if (sidebarToggle) sidebarToggle.style.display = 'none';
+    
+    // Show auth screen initially (will be hidden if auto-login succeeds)
+    if (!authToken) {
+      authScreen.classList.add('show');
+    }
+    
     connect();
