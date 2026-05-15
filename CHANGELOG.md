@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-15
+
+### Added
+- **OpenCode Zen Provider** — Added support for OpenCode Zen AI gateway as a new LLM provider
+  - 30+ curated models including GPT, Claude, Gemini, Qwen, Kimi, GLM, MiniMax
+  - 5 free tier models: DeepSeek V4 Flash, MiniMax M2.5, Ring 2.6 1T, Nemotron 3 Super, Big Pickle
+  - OpenAI-compatible API at `https://opencode.ai/zen/v1`
+  - Automatic model validation and caching
+  - Get API key from: https://opencode.ai/zen
+- **New Environment Variables**:
+  - `OPENCODE_ZEN_API_KEY` — Your OpenCode Zen API key
+  - `OPENCODE_ZEN_MODEL` — Default model (optional, defaults to `deepseek-v4-flash-free`)
+  - Update `LLM_PROVIDER=opencode-zen` to use OpenCode Zen
+
+### Changed
+- **API `/api/chat/config`** — Now includes OpenCode Zen in available providers list
+- **API `/api/chat/models`** — Supports fetching OpenCode Zen models
+- **API `/api/chat/status`** — Shows OpenCode Zen configuration status
+- **WebSocket `chat_session_create`** — Supports `opencode-zen` as provider option
+
 ## [1.0.1] - 2026-05-15
 
 ### Fixed
