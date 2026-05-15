@@ -198,6 +198,9 @@
           <div class="chat-active-ui" id="chatActiveUi" style="display: none; flex-direction: column; flex: 1;">
             <!-- Chat Model Bar -->
             <div class="chat-model-bar">
+              <select class="chat-provider-select" id="chatProviderSelect" title="Select LLM Provider">
+                <option value="">Loading providers...</option>
+              </select>
               <select class="chat-model-select" id="chatModelSelect" title="Select AI Model">
                 <option value="">Loading models...</option>
               </select>
@@ -254,12 +257,7 @@
               </div>
             </div>
             
-            <!-- Connection Error Banner -->
-            <div class="chat-error-banner" id="chatErrorBanner" style="display: none;">
-              <span class="error-icon">⚠️</span>
-              <span class="error-message" id="chatErrorMessage">Connection error</span>
-              <button class="close-btn" id="closeErrorBanner">×</button>
-            </div>
+
 
             <!-- Chat Messages -->
             <div class="chat-messages-container" id="chatMessagesContainer">

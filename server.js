@@ -61,6 +61,7 @@ import { join as pathJoin, extname, basename } from 'path';
 import {
   createPiSession,
   restorePiSession,
+  getPiSession,
   getPiSessionFile,
   sendPiPrompt,
   abortPiSession,
@@ -108,8 +109,9 @@ if (!['ollama', 'nvidia'].includes(LLM_PROVIDER)) {
  * and OPENAI_API_KEY env vars for OpenAI-compatible endpoints (NVIDIA NIM, Ollama).
  * NOTE: We do NOT set PI_OFFLINE=1 — that would suppress the actual LLM inference call.
  */
-function buildPiProviderConfig() {
-  if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
+function buildPiProviderConfig(provider = null) {
+  const effectiveProvider = provider || LLM_PROVIDER;
+  if (effectiveProvider === 'nvidia' && process.env.NVIDIA_API_KEY) {
     return {
       provider: 'openai',
       baseUrl: 'https://integrate.api.nvidia.com/v1',
@@ -118,7 +120,7 @@ function buildPiProviderConfig() {
       noBuiltinTools: true
     };
   }
-  if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
+  if (effectiveProvider === 'ollama' && process.env.OLLAMA_HOST) {
     const ollamaBaseUrl = process.env.OLLAMA_HOST.replace(/\/$/, '');
     const openAiCompatibleUrl = ollamaBaseUrl.endsWith('/v1') ? ollamaBaseUrl : `${ollamaBaseUrl}/v1`;
     return {
@@ -128,6 +130,25 @@ function buildPiProviderConfig() {
     };
   }
   return null;
+}
+
+/**
+ * Safely convert a tool result (which may be an Error, object, or string)
+ * into a displayable string for the frontend.
+ */
+function safeStringifyToolResult(result) {
+  if (result === null || result === undefined) return '';
+  if (typeof result === 'string') return result;
+  if (result instanceof Error) return result.message || String(result);
+  if (typeof result.message === 'string') return result.message;
+  if (typeof result.toString === 'function' && result.toString !== Object.prototype.toString) {
+    return result.toString();
+  }
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return String(result);
+  }
 }
 
 console.log('Configuration:');
@@ -346,7 +367,7 @@ function detectAvailableTerminals() {
       // WSL not available
     }
   } else {
-    // Unix/Linux/Mac systems
+    // Unix/Linux/Mac/Android systems
     const unixShells = [
       { id: 'bash', command: 'bash', args: [], icon: '🐚', description: 'Bourne Again Shell' },
       { id: 'zsh', command: 'zsh', args: [], icon: '⭐', description: 'Z Shell (modern)' },
@@ -364,6 +385,27 @@ function detectAvailableTerminals() {
         });
       } catch (e) {
         // Shell not available
+      }
+    }
+    
+    // Android / Termux shells (when server runs on-device or in Termux)
+    const androidShells = [
+      { id: 'termux-bash', path: '/data/data/com.termux/files/usr/bin/bash', args: [], icon: '📱', description: 'Termux Bash' },
+      { id: 'termux-zsh', path: '/data/data/com.termux/files/usr/bin/zsh', args: [], icon: '📱', description: 'Termux Zsh' },
+      { id: 'android-sh', path: '/system/bin/sh', args: [], icon: '🤖', description: 'Android system shell' }
+    ];
+    
+    for (const shell of androidShells) {
+      if (existsSync(shell.path)) {
+        terminals.push({
+          id: shell.id,
+          name: shell.description,
+          command: shell.path,
+          args: shell.args,
+          icon: shell.icon,
+          description: shell.description,
+          recommended: terminals.length === 0  // Recommend if no other shells found
+        });
       }
     }
   }
@@ -407,7 +449,17 @@ app.use(express.static(join(__dirname, 'public')));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), llmProvider: LLM_PROVIDER, ollamaHost: process.env.OLLAMA_HOST || null, nvidiaApiKey: !!process.env.NVIDIA_API_KEY });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    llmProvider: LLM_PROVIDER,
+    ollamaHost: process.env.OLLAMA_HOST || null,
+    nvidiaApiKey: !!process.env.NVIDIA_API_KEY,
+    availableProviders: [
+      ...(process.env.OLLAMA_HOST ? [{ id: 'ollama', name: 'Ollama' }] : []),
+      ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : [])
+    ]
+  });
 });
 
 // Public chat provider status (for launcher/UI testing)
@@ -641,11 +693,53 @@ async function validateOllamaModel(model) {
 // Confirmed working free-tier NVIDIA models (tested live)
 const NVIDIA_FALLBACK_MODELS = [
   { id: 'meta/llama-3.1-8b-instruct', name: 'Llama 3.1 8B (Fast)' },
+  { id: 'meta/llama-3.1-70b-instruct', name: 'Llama 3.1 70B' },
+  { id: 'meta/llama-3.1-405b-instruct', name: 'Llama 3.1 405B' },
+  { id: 'meta/llama-3.2-1b-instruct', name: 'Llama 3.2 1B' },
+  { id: 'meta/llama-3.2-3b-instruct', name: 'Llama 3.2 3B' },
+  { id: 'meta/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
+  { id: 'meta/llama-2-70b-chat', name: 'Llama 2 70B Chat' },
+  { id: 'microsoft/phi-3-mini-128k-instruct', name: 'Phi-3 Mini' },
+  { id: 'microsoft/phi-3-medium-128k-instruct', name: 'Phi-3 Medium' },
+  { id: 'google/gemma-2-9b-it', name: 'Gemma 2 9B' },
+  { id: 'google/gemma-2-27b-it', name: 'Gemma 2 27B' },
+  { id: 'google/codegemma-7b', name: 'CodeGemma 7B' },
+  { id: 'mistralai/mistral-7b-instruct-v0.3', name: 'Mistral 7B' },
+  { id: 'mistralai/mixtral-8x7b-instruct-v0.1', name: 'Mixtral 8x7B' },
+  { id: 'mistralai/mixtral-8x22b-instruct-v0.1', name: 'Mixtral 8x22B' },
+  { id: 'mistralai/mistral-large-instruct-2407', name: 'Mistral Large' },
+  { id: 'nv-mistralai/mistral-nemo-12b-instruct', name: 'Mistral Nemo 12B' },
+  { id: 'qwen/qwen2-7b-instruct', name: 'Qwen2 7B' },
+  { id: 'qwen/qwen2.5-7b-instruct', name: 'Qwen2.5 7B' },
+  { id: 'qwen/qwen2.5-14b-instruct', name: 'Qwen2.5 14B' },
+  { id: 'qwen/qwen2.5-72b-instruct', name: 'Qwen2.5 72B' },
+  { id: 'deepseek-ai/deepseek-coder-6.7b-instruct', name: 'DeepSeek Coder 6.7B' },
   { id: 'stepfun-ai/step-3.5-flash', name: 'StepFun 3.5 Flash (Reasoning)' },
 ];
 
 const NVIDIA_MODEL_DISPLAY_NAMES = {
   'meta/llama-3.1-8b-instruct': 'Llama 3.1 8B (Fast)',
+  'meta/llama-3.1-70b-instruct': 'Llama 3.1 70B',
+  'meta/llama-3.1-405b-instruct': 'Llama 3.1 405B',
+  'meta/llama-3.2-1b-instruct': 'Llama 3.2 1B',
+  'meta/llama-3.2-3b-instruct': 'Llama 3.2 3B',
+  'meta/llama-3.3-70b-instruct': 'Llama 3.3 70B',
+  'meta/llama-2-70b-chat': 'Llama 2 70B Chat',
+  'microsoft/phi-3-mini-128k-instruct': 'Phi-3 Mini',
+  'microsoft/phi-3-medium-128k-instruct': 'Phi-3 Medium',
+  'google/gemma-2-9b-it': 'Gemma 2 9B',
+  'google/gemma-2-27b-it': 'Gemma 2 27B',
+  'google/codegemma-7b': 'CodeGemma 7B',
+  'mistralai/mistral-7b-instruct-v0.3': 'Mistral 7B',
+  'mistralai/mixtral-8x7b-instruct-v0.1': 'Mixtral 8x7B',
+  'mistralai/mixtral-8x22b-instruct-v0.1': 'Mixtral 8x22B',
+  'mistralai/mistral-large-instruct-2407': 'Mistral Large',
+  'nv-mistralai/mistral-nemo-12b-instruct': 'Mistral Nemo 12B',
+  'qwen/qwen2-7b-instruct': 'Qwen2 7B',
+  'qwen/qwen2.5-7b-instruct': 'Qwen2.5 7B',
+  'qwen/qwen2.5-14b-instruct': 'Qwen2.5 14B',
+  'qwen/qwen2.5-72b-instruct': 'Qwen2.5 72B',
+  'deepseek-ai/deepseek-coder-6.7b-instruct': 'DeepSeek Coder 6.7B',
   'stepfun-ai/step-3.5-flash': 'StepFun 3.5 Flash (Reasoning)',
 };
 
@@ -663,9 +757,6 @@ let _nvidiaModelsCache = null;
 let _nvidiaModelsCacheTime = 0;
 const NVIDIA_MODELS_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-// Set of verified-working free-tier NVIDIA model IDs — kept in sync with NVIDIA_FALLBACK_MODELS
-const NVIDIA_VERIFIED_MODEL_IDS = new Set(getNvidiaFallbackModels().map(m => m.id));
-
 async function getAvailableNvidiaModels() {
   if (_nvidiaModelsCache && (Date.now() - _nvidiaModelsCacheTime) < NVIDIA_MODELS_CACHE_TTL) {
     return _nvidiaModelsCache;
@@ -679,13 +770,14 @@ async function getAvailableNvidiaModels() {
     if (response.ok) {
       const data = await response.json();
       const allModels = data.data || [];
-      // Only expose models from our verified fallback list that also appear in the API.
-      // This avoids showing models that return 404/410 when actually used.
-      const verifiedIds = new Set(getNvidiaFallbackModels().map(m => m.id));
-      _nvidiaModelsCache = allModels.filter(m => verifiedIds.has(m.id));
+      // Expose ALL models returned by the API so users see their full catalog.
+      // Error handling in chat_session_create / chat_send will reject unsupported ones.
+      _nvidiaModelsCache = allModels.map(m => ({ id: m.id, name: m.id }));
       _nvidiaModelsCacheTime = Date.now();
-      console.log(`📋 NVIDIA API returned ${allModels.length} models, filtered to ${_nvidiaModelsCache.length} verified`);
+      console.log(`📋 NVIDIA API returned ${allModels.length} models`);
       return _nvidiaModelsCache;
+    } else {
+      console.warn(`⚠️ NVIDIA API returned ${response.status}: ${response.statusText}`);
     }
   } catch (err) {
     console.error('Failed to fetch NVIDIA NIM models:', err.message);
@@ -794,8 +886,13 @@ function wirePiSessionEvents(piSession, ws, clientSessionId, clientData, serverS
           ws.send(JSON.stringify({ type: 'tool_start', sessionId: clientSessionId, toolId: event.toolCallId, name: event.toolName, description: `Executing ${event.toolName}...`, arguments: event.args }));
           break;
         }
+        case 'tool_execution_update': {
+          ws.send(JSON.stringify({ type: 'tool_progress', sessionId: clientSessionId, toolId: event.toolCallId, progress: event.partialResult }));
+          break;
+        }
         case 'tool_execution_end': {
-          ws.send(JSON.stringify({ type: 'tool_complete', sessionId: clientSessionId, toolId: event.toolCallId, result: JSON.stringify(event.result), success: !event.isError }));
+          const resultStr = safeStringifyToolResult(event.result);
+          ws.send(JSON.stringify({ type: 'tool_complete', sessionId: clientSessionId, toolId: event.toolCallId, result: resultStr, success: !event.isError }));
           break;
         }
         case 'extension_error': {
@@ -1286,6 +1383,14 @@ app.get('/api/chat/status', requireAuth, async (req, res) => {
     ollamaHost: process.env.OLLAMA_HOST,
     ollamaModel: LLM_PROVIDER === 'ollama' ? defaultModel : null,
     llmProvider: LLM_PROVIDER,
+    availableProviders: [
+      ...(process.env.OLLAMA_HOST ? [{ id: 'ollama', name: 'Ollama' }] : []),
+      ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : [])
+    ],
+    ollamaConfigured: !!process.env.OLLAMA_HOST,
+    nvidiaConfigured: !!process.env.NVIDIA_API_KEY,
+    ollamaModel: LLM_PROVIDER === 'ollama' ? defaultModel : null,
+    nvidiaModel: LLM_PROVIDER === 'nvidia' ? defaultModel : null,
     availableModels: modelsList
   });
 });
@@ -1296,12 +1401,13 @@ app.get('/api/chat/status', requireAuth, async (req, res) => {
 
 // Sign out from Copilot (delete token file)
 
-// Get available LLM models
+// Get available LLM models (optionally filtered by provider query param)
 app.get('/api/chat/models', requireAuth, async (req, res) => {
   try {
+    const requestedProvider = (req.query.provider || LLM_PROVIDER).toLowerCase();
     let models = [];
-    
-    if (LLM_PROVIDER === 'ollama' && process.env.OLLAMA_HOST) {
+
+    if (requestedProvider === 'ollama' && process.env.OLLAMA_HOST) {
       const ollamaModels = await getAvailableOllamaModels();
       if (ollamaModels.length > 0) {
         models = ollamaModels.map(m => ({
@@ -1311,8 +1417,7 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
           size: m.size
         }));
       }
-    } else if (LLM_PROVIDER === 'nvidia' && process.env.NVIDIA_API_KEY) {
-      // Fetch NVIDIA NIM models from API (or use fallback)
+    } else if (requestedProvider === 'nvidia' && process.env.NVIDIA_API_KEY) {
       let nvidiaModels = await getAvailableNvidiaModels();
       if (nvidiaModels.length === 0) {
         nvidiaModels = getNvidiaFallbackModels();
@@ -1326,25 +1431,22 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
         }));
       }
     } else {
-      // Unsupported provider — return empty list
-      console.warn(`⚠️  LLM provider "${LLM_PROVIDER}" is not supported. Only Ollama and NVIDIA NIM are available.`);
+      console.warn(`⚠️  Provider "${requestedProvider}" is not configured or unsupported.`);
     }
-    
-    // Comprehensive fallback defaults (merged with SDK results below)
+
+    // Comprehensive fallback defaults
     let fallbackModels = [];
-    if (LLM_PROVIDER === 'ollama') {
+    if (requestedProvider === 'ollama') {
       fallbackModels = [
         { id: 'llama3.2', name: 'Llama 3.2', type: 'ollama' },
         { id: 'codellama', name: 'CodeLlama', type: 'ollama' }
       ];
-    } else if (LLM_PROVIDER === 'nvidia') {
+    } else if (requestedProvider === 'nvidia') {
       fallbackModels = getNvidiaFallbackModels().map(m => ({
         id: m.id || m.name,
         name: getNvidiaModelDisplayName(m.id || m.name),
         type: 'nvidia'
       }));
-    } else {
-      fallbackModels = [];
     }
 
     // Merge SDK results with fallback, deduplicate by id
@@ -1360,21 +1462,41 @@ app.get('/api/chat/models', requireAuth, async (req, res) => {
     if (models.length === 0) {
       models = fallbackModels;
     }
-    
+
     res.json({
       success: true,
       models,
-      llmProvider: LLM_PROVIDER,
+      llmProvider: requestedProvider,
       provider: {
-        type: LLM_PROVIDER,
-        url: LLM_PROVIDER === 'ollama' ? (process.env.OLLAMA_HOST || 'http://localhost:11434') :
-             LLM_PROVIDER === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' :
+        type: requestedProvider,
+        url: requestedProvider === 'ollama' ? (process.env.OLLAMA_HOST || 'http://localhost:11434') :
+             requestedProvider === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' :
              'GitHub Copilot Cloud'
       }
     });
   } catch (err) {
     console.error('Error getting models:', err);
     res.status(500).json({ success: false, message: 'Failed to get models' });
+  }
+});
+
+// Get chat configuration (which providers are available)
+app.get('/api/chat/config', requireAuth, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      llmProvider: LLM_PROVIDER,
+      availableProviders: [
+        ...(process.env.OLLAMA_HOST ? [{ id: 'ollama', name: 'Ollama' }] : []),
+        ...(process.env.NVIDIA_API_KEY ? [{ id: 'nvidia', name: 'NVIDIA NIM' }] : [])
+      ],
+      ollamaConfigured: !!process.env.OLLAMA_HOST,
+      nvidiaConfigured: !!process.env.NVIDIA_API_KEY,
+      defaultProvider: LLM_PROVIDER
+    });
+  } catch (err) {
+    console.error('Error getting chat config:', err);
+    res.status(500).json({ success: false, message: 'Failed to get chat config' });
   }
 });
 
@@ -1737,12 +1859,15 @@ app.get('/api/chat/sessions', requireAuth, async (req, res) => {
         }
       }
       
-      // Validate model for current provider before exposing to frontend
+      // Validate model for session's provider before exposing to frontend
       let displayModel = dbSession.model;
-      if (!(await validateModelForProvider(displayModel))) {
-        displayModel = (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct');
-        // Update the DB record so stale model is cleaned up for next time
-        try { updateChatSessionModel(dbSession.id, displayModel); } catch(e) {}
+      const sessionProvider = dbSession.provider || LLM_PROVIDER;
+      if (sessionProvider === 'nvidia' && !(await validateNvidiaModel(displayModel))) {
+        displayModel = 'meta/llama-3.1-8b-instruct';
+        try { updateChatSessionModel(dbSession.id, displayModel, sessionProvider); } catch(e) {}
+      } else if (sessionProvider === 'ollama' && (!displayModel || displayModel.includes('//'))) {
+        displayModel = 'llama3.2';
+        try { updateChatSessionModel(dbSession.id, displayModel, sessionProvider); } catch(e) {}
       }
       
       // Get recent messages for this session
@@ -2497,15 +2622,53 @@ wss.on('connection', (ws) => {
             break;
           }
           
-          try {
-            const ptyProcess = pty.spawn(shellConfig.command, shellConfig.args || [], {
+            try {
+            const isWindows = os.platform() === 'win32';
+            const ptyOptions = {
               name: 'xterm-color',
               cols: message.cols || 80,
               rows: message.rows || 24,
               cwd: cwd,
-              env: process.env,
-              useConpty: true  // Use modern ConPTY API on Windows 10+ (no visible window)
-            });
+              env: process.env
+            };
+            
+            // Only use ConPTY on Windows 10+; on Linux/Mac/Android it causes EACCES/ENOENT
+            if (isWindows) {
+              ptyOptions.useConpty = true;
+            }
+            
+            let ptyProcess;
+            try {
+              ptyProcess = pty.spawn(shellConfig.command, shellConfig.args || [], ptyOptions);
+            } catch (spawnErr) {
+              // If the primary shell fails (e.g., EACCES on /bin/bash), try fallback shells
+              console.warn(`Primary shell ${shellConfig.command} failed: ${spawnErr.message}. Trying fallbacks...`);
+              const fallbackShells = isWindows 
+                ? [{ command: 'cmd.exe', args: ['/k', 'title Web Terminal'] }]
+                : [
+                    { command: 'sh', args: [] },
+                    { command: '/bin/sh', args: [] },
+                    { command: '/system/bin/sh', args: [] },
+                    { command: '/data/data/com.termux/files/usr/bin/bash', args: [] },
+                  ];
+              
+              let fallbackSuccess = false;
+              for (const fallback of fallbackShells) {
+                try {
+                  ptyProcess = pty.spawn(fallback.command, fallback.args, { ...ptyOptions, cwd });
+                  shellConfig = { ...shellConfig, command: fallback.command, args: fallback.args, id: 'fallback', name: 'Fallback Shell' };
+                  console.log(`Fallback shell ${fallback.command} spawned successfully`);
+                  fallbackSuccess = true;
+                  break;
+                } catch (e) {
+                  console.warn(`Fallback shell ${fallback.command} also failed: ${e.message}`);
+                }
+              }
+              
+              if (!fallbackSuccess) {
+                throw new Error(`All shell attempts failed. Original error: ${spawnErr.message}`);
+              }
+            }
             
             terminals.set(terminalKey, { 
               pty: ptyProcess, 
@@ -2790,11 +2953,35 @@ wss.on('connection', (ws) => {
               }
               userLocks.add(clientSessionId);
               
+              // Resolve provider: prefer client choice, then fall back to global
+              const sessionProvider = (message.provider || LLM_PROVIDER).toLowerCase();
+              if (!['ollama', 'nvidia'].includes(sessionProvider)) {
+                ws.send(JSON.stringify({
+                  type: 'chat_error',
+                  message: `Invalid provider "${sessionProvider}". Only "ollama" and "nvidia" are supported.`
+                }));
+                return;
+              }
+              if (sessionProvider === 'ollama' && !process.env.OLLAMA_HOST) {
+                ws.send(JSON.stringify({
+                  type: 'chat_error',
+                  message: 'Ollama is not configured. Set OLLAMA_HOST in your environment.'
+                }));
+                return;
+              }
+              if (sessionProvider === 'nvidia' && !process.env.NVIDIA_API_KEY) {
+                ws.send(JSON.stringify({
+                  type: 'chat_error',
+                  message: 'NVIDIA NIM is not configured. Set NVIDIA_API_KEY in your environment.'
+                }));
+                return;
+              }
+
               // Resolve model: prefer client choice, then first available model, then hardcoded fallback
               let availableModelList = [];
-              if (LLM_PROVIDER === 'ollama') {
+              if (sessionProvider === 'ollama') {
                 availableModelList = await getAvailableOllamaModels();
-              } else if (LLM_PROVIDER === 'nvidia') {
+              } else if (sessionProvider === 'nvidia') {
                 availableModelList = await getAvailableNvidiaModels();
                 if (availableModelList.length === 0) {
                   availableModelList = getNvidiaFallbackModels();
@@ -2816,17 +3003,17 @@ wss.on('connection', (ws) => {
               }
               // Set default model based on provider
               if (!model) {
-                if (LLM_PROVIDER === 'ollama') model = 'llama3.2';
-                else if (LLM_PROVIDER === 'nvidia') model = 'meta/llama-3.1-8b-instruct';
+                if (sessionProvider === 'ollama') model = 'llama3.2';
+                else if (sessionProvider === 'nvidia') model = 'meta/llama-3.1-8b-instruct';
                 else model = 'meta/llama-3.1-8b-instruct';
               }
-              
-              console.log(`🔧 Creating session: ${sessionName} (${clientSessionId}) with model: ${model}`);
-              
+
+              console.log(`🔧 Creating session: ${sessionName} (${clientSessionId}) with provider: ${sessionProvider}, model: ${model}`);
+
               // Pre-check: Validate model is available for the selected provider
-              if (LLM_PROVIDER === 'ollama') {
+              if (sessionProvider === 'ollama') {
                 const modelIds = availableModelList.map(m => m.name || m.model);
-                
+
                 if (!modelIds.includes(model)) {
                   console.error(`❌ Model "${model}" is not available in Ollama`);
                   console.error('📋 Available models:', modelIds.join(', ') || 'None found');
@@ -2838,27 +3025,24 @@ wss.on('connection', (ws) => {
                   return;
                 }
               }
-              
-              if (LLM_PROVIDER === 'nvidia') {
+
+              if (sessionProvider === 'nvidia') {
                 const modelIds = availableModelList.map(m => m.id || m.name);
                 if (!modelIds.includes(model)) {
-                  const fallback = 'meta/llama-3.1-8b-instruct';
-                  console.warn(`⚠️ Model "${model}" not valid for NVIDIA, using fallback: ${fallback}`);
-                  model = fallback;
-                  // Notify frontend of the model change
+                  console.error(`❌ Model "${model}" is not available on NVIDIA NIM`);
+                  console.error('📋 Available models:', modelIds.join(', ') || 'None found');
                   ws.send(JSON.stringify({
-                    type: 'chat_model_changed',
-                    clientSessionId: clientSessionId,
-                    model: fallback,
-                    originalModel: message.model,
-                    message: `Model switched to ${fallback} (original model not available on NVIDIA)`
+                    type: 'chat_error',
+                    message: `Model "${model}" is not available on NVIDIA NIM. Available models: ${modelIds.join(', ') || 'None found'}. Please select a different model.`
                   }));
+                  userLocks.delete(clientSessionId);
+                  return;
                 }
               }
-              
+
               // Create session in database
-              const dbResult = createChatSession(clientData.userId, sessionName, model, LLM_PROVIDER, null, message.workingDirectory || null);
-              
+              const dbResult = createChatSession(clientData.userId, sessionName, model, sessionProvider, null, message.workingDirectory || null);
+
               if (!dbResult.success) {
                 ws.send(JSON.stringify({
                   type: 'chat_error',
@@ -2867,20 +3051,20 @@ wss.on('connection', (ws) => {
                 userLocks.delete(clientSessionId);
                 return;
               }
-              
+
               // Normalize model name for Ollama (add :latest if no tag specified)
-              const normalizedModel = LLM_PROVIDER === 'ollama' ? (model.includes(':') ? model : `${model}:latest`) : model;
-              
+              const normalizedModel = sessionProvider === 'ollama' ? (model.includes(':') ? model : `${model}:latest`) : model;
+
               // Get working directory from message or use default
               const workingDirectory = ensureWorkingDirectory(message.workingDirectory || WORKSPACE_DIR);
-              
+
               // Create agent session based on engine selection
               let sdkSessionId = null;
               let chatSessionData;
-              
+
               if (agentEngine === 'pi-agent') {
                 // ===== PI Agent RPC mode =====
-                const piProviderConfig = buildPiProviderConfig();
+                const piProviderConfig = buildPiProviderConfig(sessionProvider);
                 if (!piProviderConfig) {
                   console.warn('⚠️  Cannot create PI Agent session — no valid provider config. Check LLM_PROVIDER and API keys.');
                   ws.send(JSON.stringify({
@@ -2893,18 +3077,18 @@ wss.on('connection', (ws) => {
                 }
                 try {
                   const piSession = await createPiSession(clientSessionId, sessionName, model, workingDirectory, piProviderConfig);
-                  
+
                   // Persist PI's native session file path to our DB for future reconnection
                   if (piSession.sessionFile) {
                     updateChatSessionPiFile(dbResult.sessionId, piSession.sessionFile);
                     console.log(`💾 PI session file persisted to DB: ${piSession.sessionFile}`);
                   }
-                  
+
                   // Wire PI events to WebSocket messages for this user
                   wirePiSessionEvents(piSession, ws, clientSessionId, clientData, dbResult.sessionId);
-                  
+
                   console.log('✅ PI Agent session created successfully');
-                  
+
                   chatSessionData = {
                     clientSessionId: clientSessionId,
                     sessionId: dbResult.sessionId,
@@ -2914,6 +3098,7 @@ wss.on('connection', (ws) => {
                     agentEngine: 'pi-agent',
                     name: sessionName,
                     model: model,
+                    provider: sessionProvider,
                     workingDirectory: workingDirectory,
                     history: [],
                     lastActivity: Date.now(),
@@ -3054,6 +3239,7 @@ wss.on('connection', (ws) => {
                 agentEngine: agentEngine,
                 name: sessionName,
                 model: model,
+                provider: chatSessionData.provider,
                 workingDirectory: workingDirectory,
                 history: []
               }));
@@ -3193,17 +3379,50 @@ wss.on('connection', (ws) => {
               const serverSessionId = message.serverSessionId;
               let sdkSessionId = message.sdkSessionId; // SDK session ID from client
               const sessionName = message.name || 'Chat Session';
-              const model = message.model || (LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct');
+              const currentDefaultModel = LLM_PROVIDER === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct';
+              let model = message.model || currentDefaultModel;
               
-              // Resolve working directory: message > database > default
+              // Resolve working directory and provider/model: message > database > default
               let workingDirectory = message.workingDirectory;
-              if (!workingDirectory && serverSessionId) {
-                const dbSession = getChatSessionById(serverSessionId, clientData.userId);
+              let dbSession = null;
+              if (serverSessionId) {
+                dbSession = getChatSessionById(serverSessionId, clientData.userId);
                 if (dbSession?.working_directory) {
                   workingDirectory = dbSession.working_directory;
                 }
               }
               workingDirectory = ensureWorkingDirectory(workingDirectory || WORKSPACE_DIR);
+              
+              // Resolve provider: respect session's stored provider from DB
+              let sessionProvider = dbSession?.provider || LLM_PROVIDER;
+              const storedModel = dbSession?.model || model;
+
+              // If the session's provider is no longer configured (e.g. API key removed),
+              // fall back to the global provider and update the session
+              const providerConfigured =
+                (sessionProvider === 'ollama' && !!process.env.OLLAMA_HOST) ||
+                (sessionProvider === 'nvidia' && !!process.env.NVIDIA_API_KEY);
+              if (!providerConfigured) {
+                const fallbackProvider = LLM_PROVIDER;
+                const fallbackModel = fallbackProvider === 'ollama' ? 'llama3.2' : 'meta/llama-3.1-8b-instruct';
+                console.log(`🔄 Provider "${sessionProvider}" no longer configured for session ${serverSessionId}. Falling back to ${fallbackProvider} with model ${fallbackModel}`);
+                sessionProvider = fallbackProvider;
+                model = fallbackModel;
+                if (serverSessionId) {
+                  updateChatSessionModel(serverSessionId, model, sessionProvider);
+                }
+                ws.send(JSON.stringify({
+                  type: 'chat_provider_changed',
+                  sessionId: serverSessionId,
+                  provider: sessionProvider,
+                  model: fallbackModel,
+                  reason: 'provider_no_longer_configured',
+                  message: `Session provider switched to ${fallbackProvider} because ${dbSession?.provider || 'the previous provider'} is no longer configured.`
+                }));
+              } else if (serverSessionId && !message.model && dbSession?.model) {
+                // Same provider: if client didn't send a model, trust the DB record
+                model = dbSession.model;
+              }
               
               // Check if session already exists in memory
               const userSessions = chatSessions.get(clientData.userId);
@@ -3216,7 +3435,7 @@ wss.on('connection', (ws) => {
                 // CRITICAL: Re-wire PI session events with the new WebSocket
                 // After page refresh, the old ws is closed (state=3) and events get dropped
                 if (existingSession.agentEngine === 'pi-agent' && existingSession.piSessionId) {
-                  const piSessionMap = getPiSession(existingSession.piSessionId);
+                  const piSessionMap = getPiSession(clientSessionId);
                   if (piSessionMap) {
                     console.log(`🔌 Re-wiring PI session events for ${clientSessionId} with new WebSocket`);
                     wirePiSessionEvents(piSessionMap, ws, clientSessionId, clientData, existingSession.sessionId);
@@ -3234,6 +3453,7 @@ wss.on('connection', (ws) => {
                   agentEngine: existingSession.agentEngine || 'copilot-sdk',
                   name: existingSession.name,
                   model: existingSession.model,
+                  provider: existingSession.provider,
                   workingDirectory: existingSession.workingDirectory,
                   history: existingMessages.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })) || []
                 }));
@@ -3242,7 +3462,7 @@ wss.on('connection', (ws) => {
               
               if (agentEngine === 'pi-agent') {
                 // PI Agent reconnection: use native session file if available, else start fresh
-                const piProviderConfig = buildPiProviderConfig();
+                const piProviderConfig = buildPiProviderConfig(sessionProvider);
                 if (!piProviderConfig) {
                   console.warn('⚠️  Cannot reconnect PI Agent session — no valid provider config. Check LLM_PROVIDER and API keys.');
                   ws.send(JSON.stringify({
@@ -3252,12 +3472,35 @@ wss.on('connection', (ws) => {
                   return;
                 }
                 let piSessionFile = null;
-                if (serverSessionId) {
-                  const dbSession = getChatSessionById(serverSessionId, clientData.userId);
-                  if (dbSession && dbSession.agent_engine !== 'pi-agent') {
+                if (serverSessionId && dbSession) {
+                  if (dbSession.agent_engine !== 'pi-agent') {
                     updateChatSessionAgentEngine(serverSessionId, 'pi-agent');
                   }
-                  piSessionFile = dbSession?.pi_session_file || null;
+                  piSessionFile = dbSession.pi_session_file || null;
+                }
+                // If provider changed from what was stored, don't restore from old provider's session file
+                if (dbSession?.provider && dbSession.provider !== sessionProvider) {
+                  piSessionFile = null;
+                }
+
+                // Validate model is still available for NVIDIA before reconnecting
+                if (sessionProvider === 'nvidia') {
+                  const isValid = await validateNvidiaModel(model);
+                  if (!isValid) {
+                    const fallback = sessionProvider === 'nvidia' ? 'meta/llama-3.1-8b-instruct' : 'llama3.2';
+                    console.warn(`⚠️ Reconnect model "${model}" not valid for NVIDIA, switching to fallback: ${fallback}`);
+                    model = fallback;
+                    if (serverSessionId) {
+                      updateChatSessionModel(serverSessionId, model, sessionProvider);
+                    }
+                    ws.send(JSON.stringify({
+                      type: 'chat_model_changed',
+                      sessionId: serverSessionId,
+                      model: fallback,
+                      reason: 'reconnect_model_unavailable',
+                      message: `Model switched to ${fallback} (previous model no longer available on NVIDIA)`
+                    }));
+                  }
                 }
                 
                 let piSession;
@@ -3286,6 +3529,7 @@ wss.on('connection', (ws) => {
                   agentEngine: 'pi-agent',
                   name: sessionName,
                   model: model,
+                  provider: sessionProvider,
                   workingDirectory: workingDirectory,
                   history: existingMessages.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
                   lastActivity: Date.now(),
@@ -3316,6 +3560,7 @@ wss.on('connection', (ws) => {
                   agentEngine: 'pi-agent',
                   name: sessionName,
                   model: model,
+                  provider: sessionProvider,
                   workingDirectory: workingDirectory,
                   history: existingMessages
                 }));
@@ -3439,6 +3684,7 @@ wss.on('connection', (ws) => {
                 agentEngine: 'copilot-sdk',
                 name: sessionName,
                 model: model,
+                provider: sessionProvider,
                 workingDirectory: workingDirectory,
                 history: existingMessages
               }));
@@ -3556,6 +3802,19 @@ wss.on('connection', (ws) => {
                 }));
                 return;
               }
+
+              // Validate model is still available before sending
+              if (sessionData.agentEngine === 'pi-agent' && sessionData.provider === 'nvidia') {
+                const isValid = await validateNvidiaModel(sessionData.model);
+                if (!isValid) {
+                  ws.send(JSON.stringify({
+                    type: 'chat_error',
+                    sessionId: sessionId,
+                    message: `Model "${sessionData.model}" is not available on NVIDIA NIM. Please switch to a different model in Settings.`
+                  }));
+                  return;
+                }
+              }
               
               // Add user message to history
               if (sessionData._sending) {
@@ -3612,10 +3871,12 @@ wss.on('connection', (ws) => {
                 try {
                   const imageBuffer = await readFile(message.imagePath);
                   const ext = path.extname(message.imagePath).toLowerCase();
-                  const mediaType = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+                  const mimeType = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
                   const base64Data = imageBuffer.toString('base64');
-                  images = [{ type: 'image', source: { type: 'base64', mediaType, data: base64Data } }];
-                  console.log(`🖼️ Image attached: ${message.imagePath} (${mediaType}, ${Math.round(base64Data.length / 1024)}KB base64)`);
+                  // PI SDK expects flat format: { type: 'image', mimeType, data }
+                  // The SDK's providers convert this to each backend's required format
+                  images = [{ type: 'image', mimeType, data: base64Data }];
+                  console.log(`🖼️ Image attached: ${message.imagePath} (${mimeType}, ${Math.round(base64Data.length / 1024)}KB base64)`);
                 } catch (imgErr) {
                   console.warn(`⚠️ Failed to read image: ${imgErr.message}`);
                 }
@@ -3854,7 +4115,14 @@ wss.on('connection', (ws) => {
               return;
             }
             
-            const sessionData = Array.from(userSessions.values())[0];
+            // Use explicit sessionId if provided, otherwise fall back to first active session
+            const sessionId = message.sessionId;
+            let sessionData;
+            if (sessionId && userSessions.has(sessionId)) {
+              sessionData = userSessions.get(sessionId);
+            } else {
+              sessionData = Array.from(userSessions.values())[0];
+            }
             if (!sessionData) {
               ws.send(JSON.stringify({ type: 'chat_error', message: 'No active session' }));
               return;

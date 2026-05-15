@@ -231,7 +231,8 @@ function translateEvent(event) {
         }
         if (event.message?.stopReason === 'error') {
           // Provide more detailed error info if available
-          const errorDetail = event.error || event.message?.error || 'Unknown error';
+          // SDK stores error message in event.message.errorMessage (not nested under .error)
+          const errorDetail = event.message?.errorMessage || event.error?.errorMessage || event.message?.error?.errorMessage || event.error || event.message?.error || 'Unknown error';
           log('❌ Model error occurred:', errorDetail, 'Model:', event.message?.model || 'unknown');
           return { type: 'agent_event', subtype: 'extension_error', error: `The model returned an error: ${errorDetail}. Check that Ollama is running and the model is pulled (e.g., run: ollama pull llama3.2:latest).` };
         }
@@ -239,6 +240,12 @@ function translateEvent(event) {
         return { type: 'agent_event', subtype: 'message_end', message: event.message, fullText: '' };
       }
       return null;
+    }
+    case 'error': {
+      // Provider-level error emitted by SDK (e.g., openai-completions catch block)
+      const errorDetail = event.error?.errorMessage || event.errorMessage || event.error || event.reason || 'Unknown provider error';
+      log('❌ Provider error event:', errorDetail);
+      return { type: 'agent_event', subtype: 'extension_error', error: `Provider error: ${errorDetail}` };
     }
     case 'tool_execution_start':
       return { type: 'agent_event', subtype: 'tool_execution_start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args };
@@ -316,16 +323,33 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
   // so we detect by baseUrl containing nvidia.com
   const isNvidia = config.provider === 'nvidia' || (config.baseUrl && config.baseUrl.includes('nvidia.com'));
 
-  // NVIDIA NIM uses OpenAI-compatible API, so we must register the key under 'openai'
-  // for the SDK's auth system to recognize it.
-  if (config.apiKey) {
-    if (isNvidia) {
-      authStorage.setRuntimeApiKey('openai', config.apiKey);
-      log('🔑 Registered NVIDIA API key as OpenAI provider key');
-    } else {
-      authStorage.setRuntimeApiKey(config.provider, config.apiKey);
-    }
+  // The SDK's hasConfiguredAuth() checks providerRequestConfigs, not authStorage.
+  // Register the provider explicitly so auth validation passes for our custom model objects.
+  const providerName = isNvidia ? 'nvidia' : (config.provider || 'ollama');
+  const apiKey = config.apiKey || 'ollama';
+  try {
+    modelRegistry.registerProvider(providerName, { apiKey });
+    log('🔑 Registered provider in ModelRegistry:', providerName);
+  } catch (e) {
+    log('⚠️ Provider registration warning:', e.message);
   }
+
+  // Also register 'openai' because both Ollama and NVIDIA use api='openai-completions',
+  // and the SDK's internal auth resolution may look for 'openai' provider.
+  try {
+    modelRegistry.registerProvider('openai', { apiKey });
+    log('🔑 Registered openai provider in ModelRegistry for openai-completions API');
+  } catch (e) {
+    log('⚠️ openai provider registration warning:', e.message);
+  }
+
+  // Also register the key in authStorage so getApiKeyAndHeaders() can retrieve it.
+  authStorage.setRuntimeApiKey(providerName, apiKey);
+  log('🔑 Registered API key in authStorage for provider:', providerName);
+
+  // Register 'openai' in authStorage too, as a fallback for SDK internal lookups
+  authStorage.setRuntimeApiKey('openai', apiKey);
+  log('🔑 Registered API key in authStorage for provider: openai');
 
   // Resolve model.
   // For Ollama, we create a custom model object rather than relying on SDK registry templates,
@@ -400,6 +424,8 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
   // to a .jsonl file under PI_SESSION_DIR.
   const sessionManager = sdk.SessionManager.create(PI_SESSION_DIR);
 
+  log('🔧 Creating PI agent session with model:', sdkModel?.id, 'provider:', sdkModel?.provider, 'baseUrl:', sdkModel?.baseUrl, 'cwd:', safeWorkingDirectory);
+
   // Let the SDK auto-create coding tools for the working directory.
   const { session, extensionsResult } = await sdk.createAgentSession({
     cwd: safeWorkingDirectory,
@@ -410,6 +436,8 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
     sessionManager,
     settingsManager,
   });
+
+  log('✅ PI agent session created. SessionId:', session.sessionId, 'SessionFile:', session.sessionFile);
 
   const entry = {
     session,
@@ -424,11 +452,12 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
   };
 
   session.subscribe((event) => {
-    const translated = translateEvent(event);
-    if (!translated) return;
+    try {
+      const translated = translateEvent(event);
+      if (!translated) return;
 
-    switch (translated.subtype) {
-      case 'text_delta': {
+      switch (translated.subtype) {
+        case 'text_delta': {
         const delta = translated.delta || '';
         if (delta) {
           entry.textAccumulator += delta;
@@ -505,6 +534,10 @@ export async function createPiSession(clientSessionId, sessionName, model, worki
         entry.onError?.(`Extension error: ${translated.error}`);
         break;
       }
+      }
+    } catch (err) {
+      log('❌ Error in session.subscribe handler:', err.message, err.stack);
+      entry.onError?.(`Extension error: ${err.message}`);
     }
   });
 
@@ -571,8 +604,20 @@ export async function sendPiPrompt(clientSessionId, promptText, images = null) {
 // ── abortPiSession ─────────────────────────────────────────────────
 export async function abortPiSession(clientSessionId) {
   const entry = piSessions.get(clientSessionId);
-  if (entry?.session?.abort) {
-    try { await entry.session.abort(); } catch (e) { /* ignore */ }
+  if (entry?.session) {
+    // Kill running bash/compaction/summary FIRST so the agent becomes idle faster
+    if (typeof entry.session.abortBash === 'function') {
+      try { entry.session.abortBash(); } catch (e) { /* ignore */ }
+    }
+    if (typeof entry.session.abortCompaction === 'function') {
+      try { entry.session.abortCompaction(); } catch (e) { /* ignore */ }
+    }
+    if (typeof entry.session.abortBranchSummary === 'function') {
+      try { entry.session.abortBranchSummary(); } catch (e) { /* ignore */ }
+    }
+    if (typeof entry.session.abort === 'function') {
+      try { await entry.session.abort(); } catch (e) { /* ignore */ }
+    }
   }
   if (entry) {
     entry._sending = false;
@@ -600,6 +645,11 @@ export function getPiState(clientSessionId) {
     sessionId: entry.piSessionId,
     messages: entry.session?.messages || [],
   };
+}
+
+// ── getPiSession ────────────────────────────────────────────────────
+export function getPiSession(clientSessionId) {
+  return piSessions.get(clientSessionId) || null;
 }
 
 // ── getPiSessionFile ────────────────────────────────────────────────

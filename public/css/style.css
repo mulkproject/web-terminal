@@ -1539,7 +1539,8 @@
       display: none;
     }
 
-    .chat-model-select {
+    .chat-model-select,
+    .chat-provider-select {
       flex: 0 1 auto;
       min-width: 180px;
       max-width: 280px;
@@ -1552,9 +1553,15 @@
       cursor: pointer;
     }
 
-    .chat-model-select:focus {
+    .chat-model-select:focus,
+    .chat-provider-select:focus {
       outline: none;
       border-color: var(--accent-primary);
+    }
+
+    .chat-provider-select {
+      min-width: 100px;
+      max-width: 140px;
     }
 
     .chat-voice-select {
@@ -1683,38 +1690,6 @@
     .chat-model-input:focus {
       outline: none;
       border-color: var(--accent-primary);
-    }
-
-    .chat-error-banner {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 16px;
-      background: rgba(239, 68, 68, 0.1);
-      border-bottom: 1px solid rgba(239, 68, 68, 0.3);
-      color: #ef4444;
-      font-size: 13px;
-    }
-
-    .chat-error-banner .error-icon {
-      font-size: 16px;
-    }
-
-    .chat-error-banner .error-message {
-      flex: 1;
-    }
-
-    .chat-error-banner .close-btn {
-      background: none;
-      border: none;
-      color: #ef4444;
-      font-size: 18px;
-      cursor: pointer;
-      padding: 0 5px;
-    }
-
-    .chat-error-banner .close-btn:hover {
-      color: #dc2626;
     }
 
     .chat-messages-container {
@@ -2766,6 +2741,11 @@
       padding: 12px;
       margin: 8px 0;
       animation: pulse 1.5s ease-in-out infinite;
+      min-height: 20px;
+    }
+    
+    .chat-message.streaming .message-content {
+      min-height: 16px;
     }
     
     @keyframes pulse {
@@ -2801,6 +2781,7 @@
       gap: 12px;
       opacity: 0.9;
       width: fit-content;
+      min-height: 20px;
     }
     
     .typing-bubble {
@@ -2893,11 +2874,16 @@
         padding: 6px 10px;
       }
       
-      .chat-model-select {
+      .chat-model-select,
+      .chat-provider-select {
         flex: 1;
         max-width: none;
         font-size: 13px;
         padding: 6px 8px;
+      }
+
+      .chat-provider-select {
+        min-width: 80px;
       }
 
       .chat-voice-select {

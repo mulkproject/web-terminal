@@ -89,6 +89,7 @@
     const chatActiveUi = document.getElementById('chatActiveUi');
     const chatMessagesContainer = document.getElementById('chatMessagesContainer');
     const chatModelSelect = document.getElementById('chatModelSelect');
+    const chatProviderSelect = document.getElementById('chatProviderSelect');
         const chatStatusBadge = document.getElementById('chatStatusBadge');
     const chatInput = document.getElementById('chatInput');
     const sendChatBtn = document.getElementById('sendChatBtn');
@@ -96,9 +97,6 @@
     const clearChatSessionBtn = document.getElementById('clearChatSessionBtn');
     const deleteChatSessionBtn = document.getElementById('deleteChatSessionBtn');
     const testConnectionBtn = document.getElementById('testConnectionBtn');
-    const chatErrorBanner = document.getElementById('chatErrorBanner');
-    const chatErrorMessage = document.getElementById('chatErrorMessage');
-    const closeErrorBanner = document.getElementById('closeErrorBanner');
     const chatMoreBtn = document.getElementById('chatMoreBtn');
     const chatMoreGroup = document.getElementById('chatMoreGroup');
     
@@ -123,6 +121,7 @@
     let agentWorkingCount = 0; // Track concurrent agent work for indicator
     let creatingSession = false; // Prevent double session creation
     let availableModels = []; // Available LLM models from server
+    let availableProviders = []; // Available LLM providers from server
     let pendingSessionInit = null; // Track session waiting for WebSocket to initialize
 
     // Password Toggle
@@ -1099,6 +1098,7 @@
         id: sessionId,
         name: sessionName,
         model: sessionModel,
+        provider: chatProviderSelect?.value || 'ollama',
         agentEngine: 'pi-agent',
         messages: [],
         initialized: false,
@@ -2262,6 +2262,7 @@
       emptyChatState.style.display = 'flex';
       chatActiveUi.style.display = 'none';
       activeChatSessionId = null;
+      if (chatProviderSelect) chatProviderSelect.disabled = false;
     }
 
     function setActiveChatSession(sessionId) {
@@ -2312,8 +2313,21 @@
         if (chatModelSelect) {
           chatModelSelect.value = session.model;
         }
+        if (chatProviderSelect && session.provider) {
+          if (Array.from(chatProviderSelect.options).some(o => o.value === session.provider)) {
+            chatProviderSelect.value = session.provider;
+          }
+          // Lock provider for existing sessions; allow changes only for brand-new sessions
+          chatProviderSelect.disabled = !!(session.initialized || session.serverSessionId);
+        }
                 
         renderChatMessages(session);
+        
+        // Reset global work indicators when switching tabs; only restore if this session has active work
+        resetAgentWorkingIndicator();
+        if (streamingMessages.has(session.id)) {
+          showAgentWorkingIndicator();
+        }
         
         // Auto-initialize if not initialized and not already initializing
         // OR if the session has serverSessionId but needs server reconnect (loaded from API)
@@ -2471,8 +2485,9 @@
         chatMessagesContainer.appendChild(streamEl);
       }
       
-      // Restore typing indicator so it survives tab switches / history reloads
-      if (indicator) {
+      // Restore typing indicator so it survives tab switches / history reloads,
+      // but only if it belongs to the session being rendered
+      if (indicator && indicator.dataset.sessionId === session.id) {
         chatMessagesContainer.appendChild(indicator);
       }
       
@@ -2939,7 +2954,8 @@
           const data = await response.json();
           console.log('Ollama config from server:', data);
 
-          // Load available models
+          // Load available providers and models
+          await loadProviderConfig();
           await loadAvailableModels();
           await loadTtsVoices();
 
@@ -2960,8 +2976,54 @@
       return null;
     }
 
+    // Load available providers from server config
+    async function loadProviderConfig() {
+      try {
+        if (!authToken) return;
+        const response = await fetch('/api/chat/config', {
+          headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          availableProviders = data.availableProviders || [];
+          if (chatProviderSelect) {
+            // Preserve current selection before clearing
+            const previousSelection = chatProviderSelect.value;
+            const wasDisabled = chatProviderSelect.disabled;
+
+            chatProviderSelect.innerHTML = '';
+            if (availableProviders.length === 0) {
+              const option = document.createElement('option');
+              option.value = '';
+              option.textContent = 'No providers';
+              chatProviderSelect.appendChild(option);
+              chatProviderSelect.disabled = true;
+            } else {
+              availableProviders.forEach(p => {
+                const providerId = typeof p === 'string' ? p : (p.id || '');
+                const providerName = typeof p === 'string' ? p.charAt(0).toUpperCase() + p.slice(1) : (p.name || providerId);
+                const option = document.createElement('option');
+                option.value = providerId;
+                option.textContent = providerName;
+                chatProviderSelect.appendChild(option);
+              });
+              chatProviderSelect.disabled = wasDisabled;
+
+              // Restore previous selection if it's still a valid option
+              const validIds = Array.from(chatProviderSelect.options).map(o => o.value);
+              if (previousSelection && validIds.includes(previousSelection)) {
+                chatProviderSelect.value = previousSelection;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load provider config:', err);
+      }
+    }
+
     // Load available models from server
-    async function loadAvailableModels() {
+    async function loadAvailableModels(provider = null) {
       try {
         console.log('Loading available models...');
         
@@ -2971,7 +3033,8 @@
           return;
         }
         
-        const response = await fetch('/api/chat/models', {
+        const targetProvider = provider || chatProviderSelect?.value || 'ollama';
+        const response = await fetch(`/api/chat/models?provider=${encodeURIComponent(targetProvider)}`, {
           headers: { 'Authorization': `Bearer ${authToken}` }
         });
 
@@ -3101,19 +3164,16 @@
       });
     }
 
-    // Show chat error banner
+    // Show chat error via notification toast instead of banner
     function showChatError(message) {
-      if (chatErrorBanner && chatErrorMessage) {
-        chatErrorMessage.textContent = message;
-        chatErrorBanner.style.display = 'flex';
+      if (message) {
+        showNotification(message, 'error', null, 6000);
       }
     }
 
-    // Hide chat error banner
+    // Hide chat error (no-op since we use toast notifications)
     function hideChatError() {
-      if (chatErrorBanner) {
-        chatErrorBanner.style.display = 'none';
-      }
+      // Notifications auto-dismiss; no persistent banner to hide
     }
 
     // Test connection to model
@@ -3161,11 +3221,6 @@
         testConnectionBtn.disabled = false;
         testConnectionBtn.textContent = '🔗 Test';
       }
-    }
-
-    // Event listeners for error banner
-    if (closeErrorBanner) {
-      closeErrorBanner.addEventListener('click', hideChatError);
     }
 
     if (testConnectionBtn) {
@@ -3219,6 +3274,7 @@
           sdkSessionId: session.sdkSessionId,
           name: session.name,
           model: session.model,
+          provider: session.provider,
           agentEngine: 'pi-agent',
           workingDirectory: session.workingDirectory || null
         }));
@@ -3234,6 +3290,7 @@
             sessionId: session.id,
             name: session.name,
             model: session.model,
+            provider: session.provider,
             agentEngine: 'pi-agent',
             workingDirectory: effectiveWorkingDirectory
           };
@@ -3359,6 +3416,7 @@
       
       const indicator = document.createElement('div');
       indicator.id = 'typing-indicator';
+      indicator.dataset.sessionId = activeChatSessionId;
       indicator.className = 'chat-message assistant typing-indicator';
       indicator.innerHTML = `
         <div class="message-avatar-header" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:12px;font-weight:600;opacity:0.8;color:var(--accent-secondary,#a78bfa)">
@@ -3372,12 +3430,15 @@
     }
 
     // Remove typing indicator
-    function removeTypingIndicator() {
+    function removeTypingIndicator(sessionId = null) {
       const indicator = document.getElementById('typing-indicator');
       // Guard: only remove if it still has the typing-indicator class
-      // (handleStreamDelta transforms it into a streaming bubble and removes the id,
-      //  but belt-and-suspenders in case of race conditions)
+      // (belt-and-suspenders in case of race conditions)
       if (indicator && indicator.classList.contains('typing-indicator')) {
+        // If sessionId is provided, only remove if this indicator belongs to that session
+        if (sessionId && indicator.dataset.sessionId !== sessionId) {
+          return;
+        }
         indicator.remove();
       }
     }
@@ -3509,14 +3570,18 @@
     // Auto-refresh model list when dropdown is clicked (to show newly downloaded models)
     chatModelSelect?.addEventListener('mousedown', async function() {
       console.log('🔄 Refreshing model list from Ollama...');
-      await loadAvailableModels();
+      const currentProvider = chatProviderSelect?.value;
+      await loadProviderConfig();
+      await loadAvailableModels(currentProvider);
       await loadTtsVoices();
     });
     
     // Also refresh when dropdown receives focus
     chatModelSelect?.addEventListener('focus', async function() {
       console.log('🔄 Refreshing model list on focus...');
-      await loadAvailableModels();
+      const currentProvider = chatProviderSelect?.value;
+      await loadProviderConfig();
+      await loadAvailableModels(currentProvider);
       await loadTtsVoices();
     });
     
@@ -3526,6 +3591,22 @@
       if (session) {
         session.model = chatModelSelect.value;
         console.log('🔄 Model changed for session:', session.id, '->', session.model);
+      }
+    });
+
+    // Provider change: reload models for the selected provider
+    chatProviderSelect?.addEventListener('change', async function() {
+      const newProvider = chatProviderSelect.value;
+      console.log('🔄 Provider changed to:', newProvider);
+      await loadAvailableModels(newProvider);
+      const session = chatSessions.get(activeChatSessionId);
+      if (session) {
+        session.provider = newProvider;
+        // Pick first available model for the new provider
+        if (availableModels.length > 0) {
+          session.model = availableModels[0].id;
+          if (chatModelSelect) chatModelSelect.value = session.model;
+        }
       }
     });
     
@@ -3650,7 +3731,23 @@
             createdSession.agentEngine = 'pi-agent';
             createdSession.initializing = false;
             createdSession.initialized = true;
-                        
+
+            // Sync provider/model from server response
+            if (data.provider) {
+              createdSession.provider = data.provider;
+              if (chatProviderSelect && activeChatSessionId === data.clientSessionId) {
+                if (Array.from(chatProviderSelect.options).some(o => o.value === data.provider)) {
+                  chatProviderSelect.value = data.provider;
+                }
+              }
+            }
+            if (data.model) {
+              createdSession.model = data.model;
+              if (chatModelSelect && activeChatSessionId === data.clientSessionId) {
+                chatModelSelect.value = data.model;
+              }
+            }
+            
             // Remove any duplicate sessions with the same serverSessionId
             // CRITICAL: Don't remove sessions that have active streaming
             chatSessions.forEach((session, id) => {
@@ -3759,12 +3856,12 @@ You can ask me anything about the code, request modifications, or upload images 
             // Skip empty/undefined assistant messages to avoid blank history bubbles
             if (!data.content || (typeof data.content === 'string' && data.content.trim().length === 0)) {
               console.log('[chat_message] Skipping empty assistant message for session', data.sessionId);
-              removeTypingIndicator();
+              removeTypingIndicator(data.sessionId);
               break;
             }
             
             // Remove typing indicator when response arrives
-            removeTypingIndicator();
+            removeTypingIndicator(data.sessionId);
             
             const targetSession = Array.from(chatSessions.values())
               .find(s => s.serverSessionId === data.sessionId || s.id === data.sessionId);
@@ -3834,6 +3931,19 @@ You can ask me anything about the code, request modifications, or upload images 
             // Re-enable input after receiving a complete assistant message
             updateChatStatus('online');
             enableChatInput(true);
+          }
+          break;
+
+        case 'chat_provider_changed':
+          {
+            const s = chatSessions.get(data.sessionId);
+            if (s) {
+              s.provider = data.provider;
+              s.model = data.model;
+              if (chatProviderSelect) chatProviderSelect.value = data.provider;
+              if (chatModelSelect) chatModelSelect.value = data.model;
+            }
+            showNotification(data.message || `Switched to ${data.provider} provider`, 'warning');
           }
           break;
 
@@ -4549,31 +4659,25 @@ You can ask me anything about the code, request modifications, or upload images 
       // is fully complete so the user always knows the agent is still working.
       
       let streamEl = streamingMessages.get(sessionId);
+      const container = document.getElementById('chatMessagesContainer');
+      
+      // If we have a tracked stream element but it's detached from the DOM,
+      // re-attach it so the user can see it (only for the active session)
+      if (streamEl && !streamEl.parentNode && container && sessionId === activeChatSessionId) {
+        container.appendChild(streamEl);
+      }
+      
       if (!streamEl) {
-        // First delta for this session — try to reuse the typing indicator bubble
-        // instead of creating a new one, so the user sees a smooth transition.
-        const container = document.getElementById('chatMessagesContainer');
         if (container) {
-          const existingIndicator = document.getElementById('typing-indicator');
-          if (existingIndicator && existingIndicator.parentNode === container) {
-            // Transform typing indicator into streaming bubble
-            existingIndicator.removeAttribute('id'); // CRITICAL: detach from typing-indicator lookups so removeTypingIndicator() won't destroy the stream
-            existingIndicator.classList.remove('typing-indicator');
-            existingIndicator.classList.add('streaming');
-            const textSpan = existingIndicator.querySelector('.typing-text');
-            if (textSpan) textSpan.remove();
-            const bubble = existingIndicator.querySelector('.typing-bubble');
-            if (bubble) bubble.remove();
-            // Ensure content div exists
-            if (!existingIndicator.querySelector('.message-content')) {
-              const contentDiv = document.createElement('div');
-              contentDiv.className = 'message-content';
-              existingIndicator.appendChild(contentDiv);
-            }
-            streamEl = existingIndicator;
+          // Check if there's already a streaming bubble in the DOM for this session
+          // (e.g. handleStreamComplete was called prematurely but more deltas arrived)
+          const existingStream = container.querySelector('.chat-message.streaming');
+          if (existingStream && existingStream.dataset.sessionId === sessionId) {
+            streamEl = existingStream;
             streamingMessages.set(sessionId, streamEl);
           } else {
-            // No indicator found — create fresh streaming bubble
+            // Create fresh streaming bubble and insert it BEFORE the typing indicator
+            // so the user sees both the typing indicator AND the stream content
             const div = document.createElement('div');
             div.className = 'chat-message assistant streaming';
             div.innerHTML = `
@@ -4583,7 +4687,17 @@ You can ask me anything about the code, request modifications, or upload images 
               <div class="message-content"></div>
             `;
             div.dataset.timestamp = Date.now();
-            container.appendChild(div);
+            div.dataset.sessionId = sessionId;
+            // Only append to container if this is the currently active session
+            // (prevents stream bubbles from appearing in wrong tab after a switch)
+            if (sessionId === activeChatSessionId) {
+              const indicator = document.getElementById('typing-indicator');
+              if (indicator && indicator.parentNode === container) {
+                container.insertBefore(div, indicator);
+              } else {
+                container.appendChild(div);
+              }
+            }
             streamEl = div;
             streamingMessages.set(sessionId, streamEl);
           }
@@ -4591,7 +4705,13 @@ You can ask me anything about the code, request modifications, or upload images 
       }
       
       // Append delta (element may be detached if user switched tabs)
-      const content = streamEl?.querySelector('.message-content');
+      let content = streamEl?.querySelector('.message-content');
+      if (!content && streamEl) {
+        // Guard: if the content div is missing for some reason, recreate it
+        content = document.createElement('div');
+        content.className = 'message-content';
+        streamEl.appendChild(content);
+      }
       if (content) {
         content.dataset.rawText = (content.dataset.rawText || '') + delta;
         content.innerHTML = formatMarkdown(content.dataset.rawText);
@@ -4606,7 +4726,7 @@ You can ask me anything about the code, request modifications, or upload images 
     function handleStreamComplete(data) {
       const { sessionId } = data;
 
-      removeTypingIndicator();
+      removeTypingIndicator(sessionId);
 
       const streamEl = streamingMessages.get(sessionId);
       if (!streamEl) {
@@ -4879,7 +4999,8 @@ You can ask me anything about the code, request modifications, or upload images 
     function sendInterrupt() {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-          type: 'chat_interrupt'
+          type: 'chat_interrupt',
+          sessionId: activeChatSessionId
         }));
       }
       resetAgentWorkingIndicator();
@@ -4974,7 +5095,7 @@ You can ask me anything about the code, request modifications, or upload images 
     
     async function resumeChatSession(sessionId) {
       try {
-        showChatError('Connecting...', 'info');
+        showNotification('Connecting...', 'info');
         updateChatStatus('connecting');
         
         const response = await fetch(`/api/chat/sessions/${sessionId}/resume`, {
